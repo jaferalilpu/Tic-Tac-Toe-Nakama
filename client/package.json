@@ -5,19 +5,12 @@
   "dependencies": {
     "@heroiclabs/nakama-js": "^2.8.0",
     "@testing-library/dom": "^10.4.1",
-    "@testing-library/jest-dom": "^6.9.1",
-    "@testing-library/react": "^16.3.0",
     "@testing-library/user-event": "^13.5.0",
-    "@types/jest": "^27.5.2",
-    "@types/node": "^16.18.126",
-    "@types/react": "^19.2.6",
-    "@types/react-dom": "^19.2.3",
     "canvas-confetti": "^1.9.4",
-    "react": "^19.2.0",
-    "react-dom": "^19.2.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
     "react-howler": "^5.2.0",
     "react-scripts": "5.0.1",
-    "typescript": "^4.9.5",
     "web-vitals": "^2.1.4"
   },
   "scripts": {
@@ -45,6 +38,13 @@
     ]
   },
   "devDependencies": {
-    "@types/canvas-confetti": "^1.9.0"
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^13.4.0",
+    "@types/canvas-confetti": "^1.9.0",
+    "@types/jest": "^29.5.14",
+    "@types/node": "^18.19.130",
+    "@types/react": "^18.3.28",
+    "@types/react-dom": "^18.3.7",
+    "typescript": "^4.9.5"
   }
 }
