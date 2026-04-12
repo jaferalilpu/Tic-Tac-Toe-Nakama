@@ -1,5 +1,5 @@
-// Nakama Server Module for Tic-Tac-Toe
-// This file needs to be compiled and placed in server-data/modules/
+// server-src/main.ts
+// Tic-Tac-Toe authoritative match + RPC matchmaking for Nakama
 
 interface TicTacToeState {
   board: (string | null)[];
@@ -12,214 +12,25 @@ interface TicTacToeState {
 
 interface MatchLabel {
   open: number;
-  skill?: number;
 }
 
-const moduleName = "tictactoe";
+const moduleName = 'tictactoe';
 const tickRate = 5;
-const maxEmptySec = 30;
 
-// Match initialization
-const matchInit: nkruntime.MatchInitFunction<TicTacToeState> = function (
-  ctx: nkruntime.Context,
-  logger: nkruntime.Logger,
-  nk: nkruntime.Nakama,
-  params: { [key: string]: string }
-): { state: TicTacToeState; tickRate: number; label: string } {
-  
-  const state: TicTacToeState = {
-    board: Array(9).fill(null),
-    currentPlayer: '',
-    players: {},
-    winner: null,
-    gameOver: false,
-    moveCount: 0
-  };
-
-  const label: MatchLabel = {
-    open: 1
-  };
-
-  return {
-    state,
-    tickRate,
-    label: JSON.stringify(label)
-  };
-};
-
-// Player joins match
-const matchJoinAttempt: nkruntime.MatchJoinAttemptFunction<TicTacToeState> = function (
-  ctx: nkruntime.Context,
-  logger: nkruntime.Logger,
-  nk: nkruntime.Nakama,
-  dispatcher: nkruntime.MatchDispatcher,
-  tick: number,
-  state: TicTacToeState,
-  presence: nkruntime.Presence,
-  metadata: { [key: string]: any }
-): { state: TicTacToeState; accept: boolean; rejectMessage?: string } | null {
-  
-  // Check if match is full
-  if (Object.keys(state.players).length >= 2) {
-    return {
-      state,
-      accept: false,
-      rejectMessage: "Match is full"
-    };
-  }
-
-  // Accept the player
-  return {
-    state,
-    accept: true
-  };
-};
-
-// Player successfully joins
-const matchJoin: nkruntime.MatchJoinFunction<TicTacToeState> = function (
-  ctx: nkruntime.Context,
-  logger: nkruntime.Logger,
-  nk: nkruntime.Nakama,
-  dispatcher: nkruntime.MatchDispatcher,
-  tick: number,
-  state: TicTacToeState,
-  presences: nkruntime.Presence[]
-): { state: TicTacToeState } | null {
-  
-  for (const presence of presences) {
-    // Assign player symbol (X or O)
-    if (Object.keys(state.players).length === 0) {
-      state.players[presence.userId] = 'X';
-      state.currentPlayer = presence.userId;
-    } else if (Object.keys(state.players).length === 1) {
-      state.players[presence.userId] = 'O';
-    }
-
-    logger.info(`Player ${presence.username} joined as ${state.players[presence.userId]}`);
-  }
-
-  // Update match label if full
-  if (Object.keys(state.players).length >= 2) {
-    const label: MatchLabel = { open: 0 };
-    dispatcher.matchLabelUpdate(JSON.stringify(label));
-  }
-
-  // Broadcast updated state to all players
-  const stateJson = JSON.stringify(state);
-  dispatcher.broadcastMessage(1, stateJson, null, null);
-
-  return { state };
-};
-
-// Player leaves match
-const matchLeave: nkruntime.MatchLeaveFunction<TicTacToeState> = function (
-  ctx: nkruntime.Context,
-  logger: nkruntime.Logger,
-  nk: nkruntime.Nakama,
-  dispatcher: nkruntime.MatchDispatcher,
-  tick: number,
-  state: TicTacToeState,
-  presences: nkruntime.Presence[]
-): { state: TicTacToeState } | null {
-  
-  for (const presence of presences) {
-    logger.info(`Player ${presence.username} left`);
-    delete state.players[presence.userId];
-  }
-
-  return { state };
-};
-
-// Match tick/loop
-const matchLoop: nkruntime.MatchLoopFunction<TicTacToeState> = function (
-  ctx: nkruntime.Context,
-  logger: nkruntime.Logger,
-  nk: nkruntime.Nakama,
-  dispatcher: nkruntime.MatchDispatcher,
-  tick: number,
-  state: TicTacToeState,
-  messages: nkruntime.MatchMessage[]
-): { state: TicTacToeState } | null {
-  
-  // Process incoming messages
-  for (const message of messages) {
-    switch (message.opCode) {
-      case 2: // Move message
-        const move = JSON.parse(nk.binaryToString(message.data));
-        state = processMove(state, message.sender.userId, move.position, dispatcher, logger);
-        break;
-      
-      case 3: // Reset game
-        if (state.gameOver) {
-          state = resetGame(state);
-          const stateJson = JSON.stringify(state);
-          dispatcher.broadcastMessage(1, stateJson, null, null);
-        }
-        break;
-    }
-  }
-
-  return { state };
-};
-
-// Process player move
-function processMove(
-  state: TicTacToeState,
-  userId: string,
-  position: number,
-  dispatcher: nkruntime.MatchDispatcher,
-  logger: nkruntime.Logger
-): TicTacToeState {
-  
-  // Validate move
-  if (state.gameOver) {
-    dispatcher.broadcastMessage(4, JSON.stringify({ error: "Game is over" }), null, null);
-    return state;
-  }
-
-  if (state.currentPlayer !== userId) {
-    dispatcher.broadcastMessage(4, JSON.stringify({ error: "Not your turn" }), null, null);
-    return state;
-  }
-
-  if (position < 0 || position > 8 || state.board[position] !== null) {
-    dispatcher.broadcastMessage(4, JSON.stringify({ error: "Invalid move" }), null, null);
-    return state;
-  }
-
-  // Apply move
-  state.board[position] = state.players[userId];
-  state.moveCount++;
-
-  // Check for winner
-  const winner = checkWinner(state.board);
-  if (winner) {
-    state.winner = userId;
-    state.gameOver = true;
-    logger.info(`Player ${userId} wins!`);
-  } else if (state.moveCount >= 9) {
-    state.gameOver = true;
-    state.winner = null; // Draw
-    logger.info("Game is a draw");
-  } else {
-    // Switch turns
-    const playerIds = Object.keys(state.players);
-    state.currentPlayer = playerIds.find(id => id !== userId) || '';
-  }
-
-  // Broadcast updated state
-  const stateJson = JSON.stringify(state);
-  dispatcher.broadcastMessage(1, stateJson, null, null);
-
-  return state;
+function makeEmptyBoard(): (string | null)[] {
+  return [null, null, null, null, null, null, null, null, null];
 }
 
-// Check for winner
 function checkWinner(board: (string | null)[]): boolean {
   const lines = [
-    [0, 1, 2], [3, 4, 5], [6, 7, 8], // Rows
-    [0, 3, 6], [1, 4, 7], [2, 5, 8], // Columns
-    [0, 4, 8], [2, 4, 6]              // Diagonals
+    [0, 1, 2],
+    [3, 4, 5],
+    [6, 7, 8],
+    [0, 3, 6],
+    [1, 4, 7],
+    [2, 5, 8],
+    [0, 4, 8],
+    [2, 4, 6],
   ];
 
   for (const [a, b, c] of lines) {
@@ -231,97 +42,315 @@ function checkWinner(board: (string | null)[]): boolean {
   return false;
 }
 
-// Reset game
 function resetGame(state: TicTacToeState): TicTacToeState {
-  state.board = Array(9).fill(null);
+  state.board = makeEmptyBoard();
   state.winner = null;
   state.gameOver = false;
   state.moveCount = 0;
-  
-  // Switch who goes first
+
   const playerIds = Object.keys(state.players);
-  state.currentPlayer = playerIds[Math.floor(Math.random() * playerIds.length)];
-  
+  if (playerIds.length > 0) {
+    state.currentPlayer = playerIds[Math.floor(Math.random() * playerIds.length)];
+  } else {
+    state.currentPlayer = '';
+  }
+
   return state;
 }
 
-// Match termination
-const matchTerminate: nkruntime.MatchTerminateFunction<TicTacToeState> = function (
-  ctx: nkruntime.Context,
-  logger: nkruntime.Logger,
-  nk: nkruntime.Nakama,
+function broadcastState(
   dispatcher: nkruntime.MatchDispatcher,
-  tick: number,
-  state: TicTacToeState,
-  graceSeconds: number
-): { state: TicTacToeState } | null {
-  
-  logger.info("Match terminated");
+  state: TicTacToeState
+) {
+  dispatcher.broadcastMessage(1, JSON.stringify(state), null, null);
+}
+
+function broadcastError(
+  dispatcher: nkruntime.MatchDispatcher,
+  error: string
+) {
+  dispatcher.broadcastMessage(4, JSON.stringify({ error }), null, null);
+}
+
+function parseMove(
+  nk: nkruntime.Nakama,
+  data: Uint8Array | string | null
+): { position: number } {
+  let raw = '';
+
+  if (typeof data === 'string') {
+    raw = data;
+  } else if (data instanceof Uint8Array) {
+    raw = nk.binaryToString(data);
+  }
+
+  if (!raw) {
+    throw new Error('Empty move payload');
+  }
+
+  return JSON.parse(raw);
+}
+
+// Match init
+const matchInit: nkruntime.MatchInitFunction<TicTacToeState> = function (
+  ctx,
+  logger,
+  nk,
+  params
+) {
+  const state: TicTacToeState = {
+    board: makeEmptyBoard(),
+    currentPlayer: '',
+    players: {},
+    winner: null,
+    gameOver: false,
+    moveCount: 0,
+  };
+
+  const label: MatchLabel = { open: 1 };
+
+  logger.info('Tic-Tac-Toe match initialized');
+
+  return {
+    state,
+    tickRate,
+    label: JSON.stringify(label),
+  };
+};
+
+// Player join attempt
+const matchJoinAttempt: nkruntime.MatchJoinAttemptFunction<TicTacToeState> =
+  function (ctx, logger, nk, dispatcher, tick, state, presence, metadata) {
+    if (Object.keys(state.players).length >= 2) {
+      return {
+        state,
+        accept: false,
+        rejectMessage: 'Match is full',
+      };
+    }
+
+    return {
+      state,
+      accept: true,
+    };
+  };
+
+// Player join
+const matchJoin: nkruntime.MatchJoinFunction<TicTacToeState> = function (
+  ctx,
+  logger,
+  nk,
+  dispatcher,
+  tick,
+  state,
+  presences
+) {
+  for (const presence of presences) {
+    const playerCount = Object.keys(state.players).length;
+
+    if (playerCount === 0) {
+      state.players[presence.userId] = 'X';
+      state.currentPlayer = presence.userId;
+      logger.info(`Player ${presence.username} joined as X`);
+    } else if (playerCount === 1) {
+      state.players[presence.userId] = 'O';
+      logger.info(`Player ${presence.username} joined as O`);
+    }
+  }
+
+  if (Object.keys(state.players).length >= 2) {
+    dispatcher.matchLabelUpdate(JSON.stringify({ open: 0 }));
+  } else {
+    dispatcher.matchLabelUpdate(JSON.stringify({ open: 1 }));
+  }
+
+  broadcastState(dispatcher, state);
+
   return { state };
 };
 
-// RPC to create a match
-const rpcCreateMatch: nkruntime.RpcFunction = function (
-  ctx: nkruntime.Context,
-  logger: nkruntime.Logger,
-  nk: nkruntime.Nakama,
-  payload: string
-): string {
-  
-  const matchId = nk.matchCreate(moduleName, {});
-  return JSON.stringify({ matchId });
-};
-
-// RPC to find available matches
-const rpcFindMatch: nkruntime.RpcFunction = function (
-  ctx: nkruntime.Context,
-  logger: nkruntime.Logger,
-  nk: nkruntime.Nakama,
-  payload: string
-): string {
-  
-  const limit = 10;
-  const isAuthoritative = true;
-  const label = "";
-  const minSize = 1;
-  const maxSize = 2;
-  const query = "+label.open:>=1";
-
-  const matches = nk.matchList(limit, isAuthoritative, label, minSize, maxSize, query);
-  
-  if (matches.length > 0) {
-    return JSON.stringify({ matchId: matches[0].matchId });
+// Player leave
+const matchLeave: nkruntime.MatchLeaveFunction<TicTacToeState> = function (
+  ctx,
+  logger,
+  nk,
+  dispatcher,
+  tick,
+  state,
+  presences
+) {
+  for (const presence of presences) {
+    logger.info(`Player ${presence.username} left`);
+    delete state.players[presence.userId];
   }
 
-  // No match found, create one
+  if (Object.keys(state.players).length < 2) {
+    dispatcher.matchLabelUpdate(JSON.stringify({ open: 1 }));
+  }
+
+  return { state };
+};
+
+// Match loop
+const matchLoop: nkruntime.MatchLoopFunction<TicTacToeState> = function (
+  ctx,
+  logger,
+  nk,
+  dispatcher,
+  tick,
+  state,
+  messages
+) {
+  for (const message of messages) {
+    try {
+      if (message.opCode === 2) {
+        const move = parseMove(nk, message.data);
+        state = processMove(
+          state,
+          message.sender.userId,
+          move.position,
+          dispatcher,
+          logger
+        );
+      }
+
+      if (message.opCode === 3) {
+        if (state.gameOver) {
+          state = resetGame(state);
+          broadcastState(dispatcher, state);
+        }
+      }
+    } catch (err: any) {
+      logger.error(`Match message error: ${err?.message || err}`);
+      broadcastError(dispatcher, 'Invalid message payload');
+    }
+  }
+
+  return { state };
+};
+
+function processMove(
+  state: TicTacToeState,
+  userId: string,
+  position: number,
+  dispatcher: nkruntime.MatchDispatcher,
+  logger: nkruntime.Logger
+): TicTacToeState {
+  if (state.gameOver) {
+    broadcastError(dispatcher, 'Game is over');
+    return state;
+  }
+
+  if (state.currentPlayer !== userId) {
+    broadcastError(dispatcher, 'Not your turn');
+    return state;
+  }
+
+  if (position < 0 || position > 8 || state.board[position] !== null) {
+    broadcastError(dispatcher, 'Invalid move');
+    return state;
+  }
+
+  const symbol = state.players[userId];
+  if (!symbol) {
+    broadcastError(dispatcher, 'Player not found in match');
+    return state;
+  }
+
+  state.board[position] = symbol;
+  state.moveCount += 1;
+
+  const won = checkWinner(state.board);
+  if (won) {
+    state.winner = userId;
+    state.gameOver = true;
+    logger.info(`Player ${userId} wins`);
+  } else if (state.moveCount >= 9) {
+    state.winner = null;
+    state.gameOver = true;
+    logger.info('Game is a draw');
+  } else {
+    const playerIds = Object.keys(state.players);
+    state.currentPlayer = playerIds.find((id) => id !== userId) || '';
+  }
+
+  broadcastState(dispatcher, state);
+  return state;
+}
+
+// Match terminate
+const matchTerminate: nkruntime.MatchTerminateFunction<TicTacToeState> = function (
+  ctx,
+  logger,
+  nk,
+  dispatcher,
+  tick,
+  state,
+  graceSeconds
+) {
+  logger.info('Match terminated');
+  return { state };
+};
+
+// RPC: create match
+const rpcCreateMatch: nkruntime.RpcFunction = function (
+  ctx,
+  logger,
+  nk,
+  payload
+): string {
   const matchId = nk.matchCreate(moduleName, {});
   return JSON.stringify({ matchId });
 };
 
-// Initialize the module
+// RPC: find match
+const rpcFindMatch: nkruntime.RpcFunction = function (
+  ctx,
+  logger,
+  nk,
+  payload
+): string {
+  const limit = 10;
+  const isAuthoritative = true;
+  const label = '';
+  const minSize = 1;
+  const maxSize = 2;
+  const query = '+label.open:>=1';
+
+  const matches = nk.matchList(limit, isAuthoritative, label, minSize, maxSize, query);
+
+  if (matches.length > 0) {
+    const first = matches[0] as any;
+    const matchId = first.matchId || first.match_id;
+    if (matchId) {
+      return JSON.stringify({ matchId });
+    }
+  }
+
+  const matchId = nk.matchCreate(moduleName, {});
+  return JSON.stringify({ matchId });
+};
+
+// Init module
 function InitModule(
   ctx: nkruntime.Context,
   logger: nkruntime.Logger,
   nk: nkruntime.Nakama,
   initializer: nkruntime.Initializer
 ) {
-  // Register match handler
   initializer.registerMatch(moduleName, {
     matchInit,
     matchJoinAttempt,
     matchJoin,
     matchLeave,
     matchLoop,
-    matchTerminate
+    matchTerminate,
   });
 
-  // Register RPC functions
-  initializer.registerRpc("create_match", rpcCreateMatch);
-  initializer.registerRpc("find_match", rpcFindMatch);
+  initializer.registerRpc('create_match', rpcCreateMatch);
+  initializer.registerRpc('find_match', rpcFindMatch);
 
-  logger.info("Tic-Tac-Toe module loaded");
+  logger.info('Tic-Tac-Toe module loaded successfully!');
 }
 
-// Required for Nakama
-// @ts-ignore
-!InitModule && InitModule.bind(null);
+globalThis.InitModule = InitModule;
