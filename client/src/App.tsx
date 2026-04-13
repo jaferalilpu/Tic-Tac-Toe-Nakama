@@ -91,24 +91,12 @@ const App: React.FC = () => {
       setStatus('Opponent joined!');
     };
 
-    const handleChannelMessage = (message: any) => {
-      console.log('Channel message:', message);
-    };
-
-    const handleNotification = (notification: any) => {
-      console.log('Notification:', notification);
-    };
-
     socket.onmatchdata = handleMatchData;
     socket.onmatchpresence = handleMatchPresence;
-    socket.onchannelmessage = handleChannelMessage;
-    socket.onnotification = handleNotification;
 
     return () => {
       socket.onmatchdata = (_matchData: MatchData) => {};
       socket.onmatchpresence = (_presenceEvent: MatchPresenceEvent) => {};
-      socket.onchannelmessage = (_message: any) => {};
-      socket.onnotification = (_notification: any) => {};
     };
   }, [myUserId]);
 
@@ -142,8 +130,8 @@ const App: React.FC = () => {
 
       const newSession = await client.authenticateDevice(
         deviceId,
-        cleanUsername,
-        true
+        true,
+        cleanUsername
       );
 
       setSession(newSession);
