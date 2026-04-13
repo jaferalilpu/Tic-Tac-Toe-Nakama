@@ -37,8 +37,7 @@ const App: React.FC = () => {
   const host =
     process.env.REACT_APP_NAKAMA_HOST || 'tic-tac-toe-nakama-1-osku.onrender.com';
 
-  const port =
-    process.env.REACT_APP_NAKAMA_PORT || '443';
+  const port = process.env.REACT_APP_NAKAMA_PORT || '443';
 
   const useSSL =
     process.env.REACT_APP_NAKAMA_SSL
@@ -165,10 +164,16 @@ const App: React.FC = () => {
       const rpc: any = await client.rpc(session, 'find_match', {});
       const payload = typeof rpc?.payload === 'string' ? rpc.payload : '{}';
       const parsed = JSON.parse(payload);
-      const matchId = parsed.matchId;
+
+      const matchId =
+        parsed.matchId ||
+        parsed.match_id ||
+        parsed.matchid ||
+        (Array.isArray(parsed.matchIds) ? parsed.matchIds[0] : undefined);
 
       if (!matchId) {
-        throw new Error('No matchId returned from RPC');
+        console.error('RPC payload received:', parsed);
+        throw new Error('No valid match ID returned from RPC');
       }
 
       const joined = await socketRef.current.joinMatch(matchId);
