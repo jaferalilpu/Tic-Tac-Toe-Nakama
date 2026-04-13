@@ -1,0 +1,23 @@
+{
+  "name": "tictactoe-nakama-server",
+  "version": "1.0.0",
+  "description": "Nakama server module for multiplayer Tic-Tac-Toe",
+  "main": "main.ts",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "clean": "rm -rf ../server-data/modules/*"
+  },
+  "keywords": [
+    "nakama",
+    "tictactoe",
+    "multiplayer",
+    "game"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.3"
+  }
+}

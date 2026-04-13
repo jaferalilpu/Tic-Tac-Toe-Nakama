@@ -1,0 +1,171 @@
+"use strict";
+const moduleName = "tictactoe";
+const tickRate = 5;
+const maxEmptySec = 30;
+const matchInit = function (ctx, logger, nk, params) {
+    const state = {
+        board: Array(9).fill(null),
+        currentPlayer: '',
+        players: {},
+        winner: null,
+        gameOver: false,
+        moveCount: 0
+    };
+    const label = {
+        open: 1
+    };
+    return {
+        state,
+        tickRate,
+        label: JSON.stringify(label)
+    };
+};
+const matchJoinAttempt = function (ctx, logger, nk, dispatcher, tick, state, presence, metadata) {
+    if (Object.keys(state.players).length >= 2) {
+        return {
+            state,
+            accept: false,
+            rejectMessage: "Match is full"
+        };
+    }
+    return {
+        state,
+        accept: true
+    };
+};
+const matchJoin = function (ctx, logger, nk, dispatcher, tick, state, presences) {
+    for (const presence of presences) {
+        if (Object.keys(state.players).length === 0) {
+            state.players[presence.userId] = 'X';
+            state.currentPlayer = presence.userId;
+        }
+        else if (Object.keys(state.players).length === 1) {
+            state.players[presence.userId] = 'O';
+        }
+        logger.info(`Player ${presence.username} joined as ${state.players[presence.userId]}`);
+    }
+    if (Object.keys(state.players).length >= 2) {
+        const label = { open: 0 };
+        dispatcher.matchLabelUpdate(JSON.stringify(label));
+    }
+    const stateJson = JSON.stringify(state);
+    dispatcher.broadcastMessage(1, stateJson, null, null);
+    return { state };
+};
+const matchLeave = function (ctx, logger, nk, dispatcher, tick, state, presences) {
+    for (const presence of presences) {
+        logger.info(`Player ${presence.username} left`);
+        delete state.players[presence.userId];
+    }
+    return { state };
+};
+const matchLoop = function (ctx, logger, nk, dispatcher, tick, state, messages) {
+    for (const message of messages) {
+        switch (message.opCode) {
+            case 2:
+                const move = JSON.parse(nk.binaryToString(message.data));
+                state = processMove(state, message.sender.userId, move.position, dispatcher, logger);
+                break;
+            case 3:
+                if (state.gameOver) {
+                    state = resetGame(state);
+                    const stateJson = JSON.stringify(state);
+                    dispatcher.broadcastMessage(1, stateJson, null, null);
+                }
+                break;
+        }
+    }
+    return { state };
+};
+function processMove(state, userId, position, dispatcher, logger) {
+    if (state.gameOver) {
+        dispatcher.broadcastMessage(4, JSON.stringify({ error: "Game is over" }), null, null);
+        return state;
+    }
+    if (state.currentPlayer !== userId) {
+        dispatcher.broadcastMessage(4, JSON.stringify({ error: "Not your turn" }), null, null);
+        return state;
+    }
+    if (position < 0 || position > 8 || state.board[position] !== null) {
+        dispatcher.broadcastMessage(4, JSON.stringify({ error: "Invalid move" }), null, null);
+        return state;
+    }
+    state.board[position] = state.players[userId];
+    state.moveCount++;
+    const winner = checkWinner(state.board);
+    if (winner) {
+        state.winner = userId;
+        state.gameOver = true;
+        logger.info(`Player ${userId} wins!`);
+    }
+    else if (state.moveCount >= 9) {
+        state.gameOver = true;
+        state.winner = null;
+        logger.info("Game is a draw");
+    }
+    else {
+        const playerIds = Object.keys(state.players);
+        state.currentPlayer = playerIds.find(id => id !== userId) || '';
+    }
+    const stateJson = JSON.stringify(state);
+    dispatcher.broadcastMessage(1, stateJson, null, null);
+    return state;
+}
+function checkWinner(board) {
+    const lines = [
+        [0, 1, 2], [3, 4, 5], [6, 7, 8],
+        [0, 3, 6], [1, 4, 7], [2, 5, 8],
+        [0, 4, 8], [2, 4, 6]
+    ];
+    for (const [a, b, c] of lines) {
+        if (board[a] && board[a] === board[b] && board[a] === board[c]) {
+            return true;
+        }
+    }
+    return false;
+}
+function resetGame(state) {
+    state.board = Array(9).fill(null);
+    state.winner = null;
+    state.gameOver = false;
+    state.moveCount = 0;
+    const playerIds = Object.keys(state.players);
+    state.currentPlayer = playerIds[Math.floor(Math.random() * playerIds.length)];
+    return state;
+}
+const matchTerminate = function (ctx, logger, nk, dispatcher, tick, state, graceSeconds) {
+    logger.info("Match terminated");
+    return { state };
+};
+const rpcCreateMatch = function (ctx, logger, nk, payload) {
+    const matchId = nk.matchCreate(moduleName, {});
+    return JSON.stringify({ matchId });
+};
+const rpcFindMatch = function (ctx, logger, nk, payload) {
+    const limit = 10;
+    const isAuthoritative = true;
+    const label = "";
+    const minSize = 1;
+    const maxSize = 2;
+    const query = "+label.open:>=1";
+    const matches = nk.matchList(limit, isAuthoritative, label, minSize, maxSize, query);
+    if (matches.length > 0) {
+        return JSON.stringify({ matchId: matches[0].matchId });
+    }
+    const matchId = nk.matchCreate(moduleName, {});
+    return JSON.stringify({ matchId });
+};
+function InitModule(ctx, logger, nk, initializer) {
+    initializer.registerMatch(moduleName, {
+        matchInit,
+        matchJoinAttempt,
+        matchJoin,
+        matchLeave,
+        matchLoop,
+        matchTerminate
+    });
+    initializer.registerRpc("create_match", rpcCreateMatch);
+    initializer.registerRpc("find_match", rpcFindMatch);
+    logger.info("Tic-Tac-Toe module loaded");
+}
+!InitModule && InitModule.bind(null);
