@@ -49,11 +49,10 @@ function resetGame(state: TicTacToeState): TicTacToeState {
   state.moveCount = 0;
 
   const playerIds = Object.keys(state.players);
-  if (playerIds.length > 0) {
-    state.currentPlayer = playerIds[Math.floor(Math.random() * playerIds.length)];
-  } else {
-    state.currentPlayer = '';
-  }
+  state.currentPlayer =
+    playerIds.length > 0
+      ? playerIds[Math.floor(Math.random() * playerIds.length)]
+      : '';
 
   return state;
 }
@@ -61,14 +60,14 @@ function resetGame(state: TicTacToeState): TicTacToeState {
 function broadcastState(
   dispatcher: nkruntime.MatchDispatcher,
   state: TicTacToeState
-) {
+): void {
   dispatcher.broadcastMessage(1, JSON.stringify(state), null, null);
 }
 
 function broadcastError(
   dispatcher: nkruntime.MatchDispatcher,
   error: string
-) {
+): void {
   dispatcher.broadcastMessage(4, JSON.stringify({ error }), null, null);
 }
 
@@ -91,21 +90,6 @@ function parseMove(
   return JSON.parse(raw);
 }
 
-function extractMatchId(matchObj: any): string {
-  if (!matchObj) return '';
-
-  if (typeof matchObj === 'string') return matchObj;
-
-  return (
-    matchObj.matchId ||
-    matchObj.match_id ||
-    matchObj.matchid ||
-    matchObj.id ||
-    ''
-  );
-}
-
-// Match init
 const matchInit: nkruntime.MatchInitFunction<TicTacToeState> = function (
   ctx,
   logger,
@@ -132,7 +116,6 @@ const matchInit: nkruntime.MatchInitFunction<TicTacToeState> = function (
   };
 };
 
-// Player join attempt
 const matchJoinAttempt: nkruntime.MatchJoinAttemptFunction<TicTacToeState> =
   function (ctx, logger, nk, dispatcher, tick, state, presence, metadata) {
     if (Object.keys(state.players).length >= 2) {
@@ -149,7 +132,6 @@ const matchJoinAttempt: nkruntime.MatchJoinAttemptFunction<TicTacToeState> =
     };
   };
 
-// Player join
 const matchJoin: nkruntime.MatchJoinFunction<TicTacToeState> = function (
   ctx,
   logger,
@@ -172,18 +154,14 @@ const matchJoin: nkruntime.MatchJoinFunction<TicTacToeState> = function (
     }
   }
 
-  if (Object.keys(state.players).length >= 2) {
-    dispatcher.matchLabelUpdate(JSON.stringify({ open: 0 }));
-  } else {
-    dispatcher.matchLabelUpdate(JSON.stringify({ open: 1 }));
-  }
+  dispatcher.matchLabelUpdate(
+    JSON.stringify({ open: Object.keys(state.players).length >= 2 ? 0 : 1 })
+  );
 
   broadcastState(dispatcher, state);
-
   return { state };
 };
 
-// Player leave
 const matchLeave: nkruntime.MatchLeaveFunction<TicTacToeState> = function (
   ctx,
   logger,
@@ -205,7 +183,6 @@ const matchLeave: nkruntime.MatchLeaveFunction<TicTacToeState> = function (
   return { state };
 };
 
-// Match loop
 const matchLoop: nkruntime.MatchLoopFunction<TicTacToeState> = function (
   ctx,
   logger,
@@ -228,11 +205,9 @@ const matchLoop: nkruntime.MatchLoopFunction<TicTacToeState> = function (
         );
       }
 
-      if (message.opCode === 3) {
-        if (state.gameOver) {
-          state = resetGame(state);
-          broadcastState(dispatcher, state);
-        }
+      if (message.opCode === 3 && state.gameOver) {
+        state = resetGame(state);
+        broadcastState(dispatcher, state);
       }
     } catch (err: any) {
       logger.error(`Match message error: ${err?.message || err}`);
@@ -274,8 +249,7 @@ function processMove(
   state.board[position] = symbol;
   state.moveCount += 1;
 
-  const won = checkWinner(state.board);
-  if (won) {
+  if (checkWinner(state.board)) {
     state.winner = userId;
     state.gameOver = true;
     logger.info(`Player ${userId} wins`);
@@ -292,7 +266,6 @@ function processMove(
   return state;
 }
 
-// Match terminate
 const matchTerminate: nkruntime.MatchTerminateFunction<TicTacToeState> = function (
   ctx,
   logger,
@@ -306,26 +279,22 @@ const matchTerminate: nkruntime.MatchTerminateFunction<TicTacToeState> = functio
   return { state };
 };
 
-// RPC: create match
 const rpcCreateMatch: nkruntime.RpcFunction = function (
   ctx,
   logger,
   nk,
   payload
 ): string {
-  const created: any = nk.matchCreate(moduleName, {});
-  const matchId = extractMatchId(created);
-
-  logger.info('rpcCreateMatch returning matchId=%s', matchId || 'undefined');
+  const matchId = nk.matchCreate(moduleName, {});
+  logger.info('rpcCreateMatch matchId=%s', matchId);
 
   if (!matchId) {
-    throw new Error('Failed to create match: no matchId returned');
+    throw new Error('matchCreate returned empty matchId');
   }
 
-  return JSON.stringify({ matchId });
+  return JSON.stringify({ matchId: String(matchId) });
 };
 
-// RPC: find match
 const rpcFindMatch: nkruntime.RpcFunction = function (
   ctx,
   logger,
@@ -348,35 +317,32 @@ const rpcFindMatch: nkruntime.RpcFunction = function (
     query
   );
 
-  logger.info('find_match: found %d candidate matches', matches.length);
+  logger.info('find_match found %d matches', matches.length);
+
+  let matchIds: string[] = [];
 
   if (matches.length > 0) {
-    const first: any = matches[0];
-    const foundMatchId = extractMatchId(first);
+    matchIds = matches
+      .map((m: any) => m.matchId || m.match_id)
+      .filter((id: string | undefined) => !!id)
+      .map((id: string) => String(id));
+  }
 
-    logger.info('find_match: existing matchId=%s', foundMatchId || 'undefined');
+  if (matchIds.length === 0) {
+    const createdMatchId = nk.matchCreate(moduleName, {});
+    logger.info('find_match created matchId=%s', createdMatchId);
 
-    if (foundMatchId) {
-      return JSON.stringify({ matchId: foundMatchId });
+    if (!createdMatchId) {
+      throw new Error('find_match could not create a match');
     }
+
+    matchIds.push(String(createdMatchId));
   }
 
-  const created: any = nk.matchCreate(moduleName, {});
-  const createdMatchId = extractMatchId(created);
-
-  logger.info(
-    'find_match: created new matchId=%s',
-    createdMatchId || 'undefined'
-  );
-
-  if (!createdMatchId) {
-    throw new Error('find_match failed: no matchId returned from matchCreate');
-  }
-
-  return JSON.stringify({ matchId: createdMatchId });
+  logger.info('find_match returning matchIds=%v', matchIds);
+  return JSON.stringify({ matchIds });
 };
 
-// Init module
 function InitModule(
   ctx: nkruntime.Context,
   logger: nkruntime.Logger,
