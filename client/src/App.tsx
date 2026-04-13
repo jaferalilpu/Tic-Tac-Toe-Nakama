@@ -1,5 +1,11 @@
-import React, { useEffect, useState } from 'react';
-import { Client, Session, Socket } from '@heroiclabs/nakama-js';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
+import {
+  Client,
+  Session,
+  Socket,
+  MatchData,
+  MatchPresenceEvent,
+} from '@heroiclabs/nakama-js';
 import confetti from 'canvas-confetti';
 import './App.css';
 
@@ -18,7 +24,7 @@ interface MatchInfo {
 const App: React.FC = () => {
   const [client, setClient] = useState<Client | null>(null);
   const [session, setSession] = useState<Session | null>(null);
-  const [socket, setSocket] = useState<Socket | null>(null);
+  const socketRef = useRef<Socket | null>(null);
 
   const [username, setUsername] = useState('');
   const [myUserId, setMyUserId] = useState('');
@@ -29,32 +35,29 @@ const App: React.FC = () => {
   const [status, setStatus] = useState('');
 
   const host =
-    process.env.REACT_APP_NAKAMA_HOST ||
-    (window.location.hostname === 'localhost'
-      ? '127.0.0.1'
-      : 'tic-tac-toe-nakama-1-osku.onrender.com');
+    process.env.REACT_APP_NAKAMA_HOST || 'tic-tac-toe-nakama-1-osku.onrender.com';
 
   const port =
-    process.env.REACT_APP_NAKAMA_PORT ||
-    (window.location.hostname === 'localhost' ? '7350' : '443');
+    process.env.REACT_APP_NAKAMA_PORT || '443';
 
   const useSSL =
     process.env.REACT_APP_NAKAMA_SSL
       ? process.env.REACT_APP_NAKAMA_SSL === 'true'
-      : window.location.hostname !== 'localhost';
+      : true;
 
   useEffect(() => {
     const nakamaClient = new Client('defaultkey', host, port, useSSL);
     setClient(nakamaClient);
-    setStatus(`Server ready: ${useSSL ? 'https' : 'http'}://${host}:${port}`);
+    setStatus(`Server ready: ${useSSL ? 'wss' : 'ws'}://${host}:${port}`);
   }, [host, port, useSSL]);
 
   useEffect(() => {
+    const socket = socketRef.current;
     if (!socket) return;
 
-    const handleMatchData = (msg: any) => {
+    const handleMatchData = (matchData: MatchData) => {
       try {
-        const decoded = new TextDecoder().decode(msg.data);
+        const decoded = new TextDecoder().decode(matchData.data);
         const data: GameState = JSON.parse(decoded);
         setGameState(data);
 
@@ -83,7 +86,7 @@ const App: React.FC = () => {
       }
     };
 
-    const handleMatchPresence = (_presence: any) => {
+    const handleMatchPresence = (_presenceEvent: MatchPresenceEvent) => {
       setStatus('Opponent joined!');
     };
 
@@ -91,22 +94,25 @@ const App: React.FC = () => {
     socket.onmatchpresence = handleMatchPresence;
 
     return () => {
-      socket.onmatchdata = null as any;
-      socket.onmatchpresence = null as any;
+      socket.onmatchdata = (_matchData: MatchData) => {};
+      socket.onmatchpresence = (_presenceEvent: MatchPresenceEvent) => {};
     };
-  }, [socket, myUserId]);
+  }, [myUserId]);
 
-  const getDeviceId = () => {
+  const getDeviceId = useCallback(() => {
     const key = 'nakama-device-id';
     let id = localStorage.getItem(key);
 
     if (!id) {
-      id = crypto.randomUUID();
+      id =
+        typeof crypto !== 'undefined' && crypto.randomUUID
+          ? crypto.randomUUID()
+          : `device-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       localStorage.setItem(key, id);
     }
 
     return id;
-  };
+  }, []);
 
   const connectToNakama = async () => {
     if (!client || !username.trim()) {
@@ -131,33 +137,23 @@ const App: React.FC = () => {
       setMyUserId(newSession.user_id || '');
       setStatus('Connected successfully');
 
-      const newSocket = client.createSocket();
-      await newSocket.connect(newSession, true);
-      setSocket(newSocket);
-    } catch (err: any) {
-      console.error('Auth error:', err);
-
-      let message = 'Unknown error';
-      try {
-        if (typeof err?.json === 'function') {
-          const body = await err.json();
-          message = body?.message || body?.error || message;
-        } else if (err?.message) {
-          message = err.message;
-        } else if (err?.status) {
-          message = `HTTP ${err.status}`;
-        }
-      } catch {
-        message = err?.message || `HTTP ${err?.status || 'unknown'}`;
+      if (socketRef.current) {
+        socketRef.current.disconnect(false);
       }
 
+      const newSocket = client.createSocket(useSSL, false);
+      await newSocket.connect(newSession, true);
+      socketRef.current = newSocket;
+    } catch (err: any) {
+      console.error('Auth error:', err);
+      const message = err?.message || 'Connection failed';
       setError(`Connection failed: ${message}`);
       setStatus('');
     }
   };
 
   const findMatch = async () => {
-    if (!client || !session || !socket) {
+    if (!client || !session || !socketRef.current) {
       setError('Not connected properly');
       return;
     }
@@ -175,38 +171,23 @@ const App: React.FC = () => {
         throw new Error('No matchId returned from RPC');
       }
 
-      const joined = await socket.joinMatch(matchId);
+      const joined = await socketRef.current.joinMatch(matchId);
       setMatch({ match_id: joined.match_id });
       setStatus('Match found! Game starts soon...');
     } catch (err: any) {
       console.error('Matchmaking error:', err);
-
-      let message = 'Unknown error';
-      try {
-        if (typeof err?.json === 'function') {
-          const body = await err.json();
-          message = body?.message || body?.error || message;
-        } else if (err?.message) {
-          message = err.message;
-        } else if (err?.status) {
-          message = `HTTP ${err.status}`;
-        }
-      } catch {
-        message = err?.message || `HTTP ${err?.status || 'unknown'}`;
-      }
-
-      setError(`Matchmaking failed: ${message}`);
+      setError(`Matchmaking failed: ${err?.message || 'Unknown error'}`);
     }
   };
 
   const makeMove = async (pos: number) => {
-    if (!socket || !match || !gameState) return;
+    if (!socketRef.current || !match || !gameState) return;
     if (gameState.gameOver) return;
     if (gameState.currentPlayer !== myUserId) return;
     if (gameState.board[pos]) return;
 
     try {
-      await socket.sendMatchState(
+      await socketRef.current.sendMatchState(
         match.match_id,
         2,
         JSON.stringify({ position: pos })
@@ -223,13 +204,21 @@ const App: React.FC = () => {
     setStatus('Ready to find a new match');
   };
 
+  useEffect(() => {
+    return () => {
+      if (socketRef.current) {
+        socketRef.current.disconnect(false);
+      }
+    };
+  }, []);
+
   return (
     <div className="app">
       <div className="header">
         <h1>🎮 Tic-Tac-Toe</h1>
         <div className="connection-info">
           <span className="server-badge">
-            Server: {useSSL ? 'https' : 'http'}://{host}:{port}
+            Server: {useSSL ? 'wss' : 'ws'}://{host}:{port}
           </span>
         </div>
       </div>
@@ -282,9 +271,7 @@ const App: React.FC = () => {
                 return (
                   <button
                     key={i}
-                    className={`cell ${cell ? 'filled' : ''} ${
-                      clickable ? 'active' : ''
-                    }`}
+                    className={`cell ${cell ? 'filled' : ''} ${clickable ? 'active' : ''}`}
                     onClick={() => makeMove(i)}
                     disabled={!clickable}
                   >
