@@ -1,225 +1,313 @@
-import React, { useMemo, useRef, useState, useEffect, useCallback } from "react";
-import { Client, Session, Socket } from "@heroiclabs/nakama-js";
+import React, { useEffect, useState } from 'react';
+import { Client, Session, Socket } from '@heroiclabs/nakama-js';
+import confetti from 'canvas-confetti';
+import './App.css';
 
-type StatusType = "idle" | "loading" | "success" | "error";
+interface GameState {
+  board: (string | null)[];
+  currentPlayer: string;
+  players: Record<string, string>;
+  winner: string | null;
+  gameOver: boolean;
+}
 
-const SERVER_KEY = "defaultkey";
-const HOST = process.env.REACT_APP_NAKAMA_HOST || "tic-tac-toe-nakama-1-osku.onrender.com";
-const PORT = Number(process.env.REACT_APP_NAKAMA_PORT || 443);
-const USE_SSL = String(process.env.REACT_APP_NAKAMA_SSL || "true") === "true";
+interface MatchInfo {
+  match_id: string;
+}
 
-function App() {
-  const [username, setUsername] = useState("jafer");
-  const [status, setStatus] = useState<StatusType>("idle");
-  const [message, setMessage] = useState("Click login to authenticate with Nakama.");
+const App: React.FC = () => {
+  const [client, setClient] = useState<Client | null>(null);
   const [session, setSession] = useState<Session | null>(null);
-  const [socketConnected, setSocketConnected] = useState(false);
-  const [userId, setUserId] = useState("");
-  const [finalUsername, setFinalUsername] = useState("");
+  const [socket, setSocket] = useState<Socket | null>(null);
 
-  const socketRef = useRef<Socket | null>(null);
-  const client = useMemo(() => new Client(SERVER_KEY, HOST, PORT, USE_SSL), []);
+  const [username, setUsername] = useState('');
+  const [myUserId, setMyUserId] = useState('');
+  const [match, setMatch] = useState<MatchInfo | null>(null);
+  const [gameState, setGameState] = useState<GameState | null>(null);
 
-  // ✅ FIX 1: Missing dependency arrays
-  const getDeviceId = useCallback(() => {
-    const existing = localStorage.getItem("nakama-device-id");
-    if (existing) return existing;
-    const newId = typeof crypto !== "undefined" && "randomUUID" in crypto
-      ? crypto.randomUUID()
-      : `device-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
-    localStorage.setItem("nakama-device-id", newId);
-    return newId;
-  }, []);
+  const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState('');
 
-  // ✅ FIX 2: Missing dependency array
-  const sanitizeUsername = useCallback((value: string) => {
-    const cleaned = value.trim().replace(/\s+/g, "_").replace(/[^a-zA-Z0-9_]/g, "");
-    return cleaned || `player_${Math.random().toString(36).slice(2, 8)}`;
-  }, []);
+  const host =
+    process.env.REACT_APP_NAKAMA_HOST ||
+    (window.location.hostname === 'localhost'
+      ? '127.0.0.1'
+      : 'tic-tac-toe-nakama-1-osku.onrender.com');
 
-  // ✅ FIX 3: Missing client dependency
-  const connectSocket = useCallback(async (authSession: Session) => {
-    if (socketRef.current) {
-      socketRef.current.close();
-      socketRef.current = null;
-    }
+  const port =
+    process.env.REACT_APP_NAKAMA_PORT ||
+    (window.location.hostname === 'localhost' ? '7350' : '443');
 
-    const socket = client.createSocket(USE_SSL, false);
+  const useSSL =
+    process.env.REACT_APP_NAKAMA_SSL
+      ? process.env.REACT_APP_NAKAMA_SSL === 'true'
+      : window.location.hostname !== 'localhost';
 
-    socket.ondisconnect = (event: any) => {
-      console.warn("Socket disconnected:", event);
-      setSocketConnected(false);
-      setMessage("Socket disconnected.");
-      socketRef.current = null;
-    };
-
-    socket.onnotification = (notification: any) => console.log("Notification:", notification);
-    socket.onmatchdata = (matchData: any) => console.log("Match data:", matchData);
-    socket.onmatchpresence = (presenceEvent: any) => console.log("Match presence:", presenceEvent);
-
-    await socket.connect(authSession, true);
-    socketRef.current = socket;
-    setSocketConnected(true);
-    return socket;
-  }, [client]);
-
-  // ✅ FIX 4: Missing dependencies
-  const updateUsernameIfNeeded = useCallback(async (authSession: Session, desiredUsername: string) => {
-    try {
-      const safeName = sanitizeUsername(desiredUsername);
-      await client.updateAccount(authSession, { username: safeName });
-      setFinalUsername(safeName);
-      return safeName;
-    } catch (err: any) {
-      console.warn("Username update failed:", err);
-      return authSession.username || "";
-    }
-  }, [client, sanitizeUsername]);
-
-  // ✅ FIX 5: All functions now properly typed
-  const handleLogin = useCallback(async () => {
-    setStatus("loading");
-    setMessage("Authenticating...");
-    setSocketConnected(false);
-
-    try {
-      const deviceId = getDeviceId();
-      const authSession = await client.authenticateDevice(deviceId, true);
-      setSession(authSession);
-      setUserId(authSession.userId || authSession.id || "unknown");
-
-      const resolvedUsername = await updateUsernameIfNeeded(authSession, username);
-      await connectSocket(authSession);
-
-      setStatus("success");
-      setFinalUsername(resolvedUsername || authSession.username || "");
-      setMessage("✅ Authentication successful and WebSocket connected over WSS.");
-    } catch (error: any) {
-      console.error("Auth error:", error);
-      let errorMessage = "Something went wrong during authentication.";
-      
-      if (error?.status === 409) {
-        errorMessage = "Username conflict. Try different username or Reset Device ID.";
-      } else if (String(error?.message || "").toLowerCase().includes("websocket")) {
-        errorMessage = "WebSocket failed. Check server connection.";
-      } else if (error?.message) {
-        errorMessage = error.message;
-      }
-
-      setStatus("error");
-      setMessage(errorMessage);
-    }
-  }, [client, username, getDeviceId, updateUsernameIfNeeded, connectSocket]);
-
-  // ✅ FIX 6: Proper cleanup
-  const handleResetDevice = useCallback(() => {
-    if (socketRef.current) {
-      socketRef.current.close();
-      socketRef.current = null;
-    }
-    localStorage.removeItem("nakama-device-id");
-    setSession(null);
-    setSocketConnected(false);
-    setUserId("");
-    setFinalUsername("");
-    setStatus("idle");
-    setMessage("Device ID cleared. Next login will create new account.");
-  }, []);
-
-  // ✅ FIX 7: useEffect cleanup
   useEffect(() => {
-    return () => {
-      if (socketRef.current) {
-        socketRef.current.close();
+    const nakamaClient = new Client('defaultkey', host, port, useSSL);
+    setClient(nakamaClient);
+    setStatus(`Server ready: ${useSSL ? 'https' : 'http'}://${host}:${port}`);
+  }, [host, port, useSSL]);
+
+  useEffect(() => {
+    if (!socket) return;
+
+    const handleMatchData = (msg: any) => {
+      try {
+        const decoded = new TextDecoder().decode(msg.data);
+        const data: GameState = JSON.parse(decoded);
+        setGameState(data);
+
+        if (data.gameOver) {
+          if (data.winner) {
+            if (data.winner === myUserId) {
+              setStatus('🎉 You won!');
+              confetti({
+                particleCount: 120,
+                spread: 70,
+                origin: { y: 0.6 },
+              });
+            } else {
+              setStatus('😢 You lost!');
+            }
+          } else {
+            setStatus('🤝 Match draw!');
+          }
+        } else if (data.currentPlayer === myUserId) {
+          setStatus('Your turn');
+        } else {
+          setStatus("Opponent's turn");
+        }
+      } catch (err) {
+        console.error('Match data parse error:', err);
       }
     };
-  }, []);
+
+    const handleMatchPresence = (_presence: any) => {
+      setStatus('Opponent joined!');
+    };
+
+    socket.onmatchdata = handleMatchData;
+    socket.onmatchpresence = handleMatchPresence;
+
+    return () => {
+      socket.onmatchdata = null as any;
+      socket.onmatchpresence = null as any;
+    };
+  }, [socket, myUserId]);
+
+  const getDeviceId = () => {
+    const key = 'nakama-device-id';
+    let id = localStorage.getItem(key);
+
+    if (!id) {
+      id = crypto.randomUUID();
+      localStorage.setItem(key, id);
+    }
+
+    return id;
+  };
+
+  const connectToNakama = async () => {
+    if (!client || !username.trim()) {
+      setError('Please enter a username');
+      return;
+    }
+
+    try {
+      setError(null);
+      setStatus('Authenticating...');
+
+      const deviceId = getDeviceId();
+      const cleanUsername = username.trim().replace(/\s+/g, '_');
+
+      const newSession = await client.authenticateDevice(
+        deviceId,
+        true,
+        cleanUsername
+      );
+
+      setSession(newSession);
+      setMyUserId(newSession.user_id || '');
+      setStatus('Connected successfully');
+
+      const newSocket = client.createSocket();
+      await newSocket.connect(newSession, true);
+      setSocket(newSocket);
+    } catch (err: any) {
+      console.error('Auth error:', err);
+
+      let message = 'Unknown error';
+      try {
+        if (typeof err?.json === 'function') {
+          const body = await err.json();
+          message = body?.message || body?.error || message;
+        } else if (err?.message) {
+          message = err.message;
+        } else if (err?.status) {
+          message = `HTTP ${err.status}`;
+        }
+      } catch {
+        message = err?.message || `HTTP ${err?.status || 'unknown'}`;
+      }
+
+      setError(`Connection failed: ${message}`);
+      setStatus('');
+    }
+  };
+
+  const findMatch = async () => {
+    if (!client || !session || !socket) {
+      setError('Not connected properly');
+      return;
+    }
+
+    try {
+      setError(null);
+      setStatus('Searching for opponent...');
+
+      const rpc: any = await client.rpc(session, 'find_match', {});
+      const payload = typeof rpc?.payload === 'string' ? rpc.payload : '{}';
+      const parsed = JSON.parse(payload);
+      const matchId = parsed.matchId;
+
+      if (!matchId) {
+        throw new Error('No matchId returned from RPC');
+      }
+
+      const joined = await socket.joinMatch(matchId);
+      setMatch({ match_id: joined.match_id });
+      setStatus('Match found! Game starts soon...');
+    } catch (err: any) {
+      console.error('Matchmaking error:', err);
+
+      let message = 'Unknown error';
+      try {
+        if (typeof err?.json === 'function') {
+          const body = await err.json();
+          message = body?.message || body?.error || message;
+        } else if (err?.message) {
+          message = err.message;
+        } else if (err?.status) {
+          message = `HTTP ${err.status}`;
+        }
+      } catch {
+        message = err?.message || `HTTP ${err?.status || 'unknown'}`;
+      }
+
+      setError(`Matchmaking failed: ${message}`);
+    }
+  };
+
+  const makeMove = async (pos: number) => {
+    if (!socket || !match || !gameState) return;
+    if (gameState.gameOver) return;
+    if (gameState.currentPlayer !== myUserId) return;
+    if (gameState.board[pos]) return;
+
+    try {
+      await socket.sendMatchState(
+        match.match_id,
+        2,
+        JSON.stringify({ position: pos })
+      );
+    } catch (err: any) {
+      console.error('Move failed:', err);
+      setError(`Move failed: ${err?.message || 'Unknown error'}`);
+    }
+  };
+
+  const leaveMatch = () => {
+    setMatch(null);
+    setGameState(null);
+    setStatus('Ready to find a new match');
+  };
 
   return (
-    <div style={{
-      minHeight: "100vh", background: "#0f172a", color: "#e2e8f0",
-      display: "flex", alignItems: "center", justifyContent: "center",
-      padding: "24px", fontFamily: "Inter, Arial, sans-serif"
-    }}>
-      <div style={{
-        width: "100%", maxWidth: "520px", background: "#1e293b",
-        borderRadius: "16px", padding: "24px", boxShadow: "0 10px 30px rgba(0,0,0,0.35)"
-      }}>
-        <h1 style={{ margin: 0, marginBottom: "8px", fontSize: "28px" }}>
-          Tic Tac Toe Login
-        </h1>
-        <p style={{ marginTop: 0, marginBottom: "20px", color: "#94a3b8" }}>
-          React + Nakama + Render + Netlify
-        </p>
-
-        <label htmlFor="username" style={{ display: "block", marginBottom: "8px", fontWeight: 600 }}>
-          Username
-        </label>
-        <input
-          id="username" type="text" value={username}
-          onChange={(e) => setUsername(e.target.value)}
-          placeholder="Enter username"
-          style={{
-            width: "100%", padding: "12px 14px", borderRadius: "10px",
-            border: "1px solid #334155", outline: "none", background: "#0f172a",
-            color: "#e2e8f0", marginBottom: "16px"
-          }}
-        />
-
-        <div style={{ display: "flex", gap: "12px", flexWrap: "wrap" }}>
-          <button
-            onClick={handleLogin}
-            disabled={status === "loading"}
-            style={{
-              padding: "12px 18px", borderRadius: "10px", border: "none",
-              background: status === "loading" ? "#475569" : "#2563eb",
-              color: "white", cursor: status === "loading" ? "not-allowed" : "pointer",
-              fontWeight: 600
-            }}
-          >
-            {status === "loading" ? "Logging in..." : "Login"}
-          </button>
-          <button
-            onClick={handleResetDevice}
-            style={{
-              padding: "12px 18px", borderRadius: "10px", border: "1px solid #475569",
-              background: "transparent", color: "#e2e8f0", cursor: "pointer", fontWeight: 600
-            }}
-          >
-            Reset Device ID
-          </button>
+    <div className="app">
+      <div className="header">
+        <h1>🎮 Tic-Tac-Toe</h1>
+        <div className="connection-info">
+          <span className="server-badge">
+            Server: {useSSL ? 'https' : 'http'}://{host}:{port}
+          </span>
         </div>
+      </div>
 
-        <div style={{
-          marginTop: "20px", padding: "16px", borderRadius: "12px",
-          background: status === "success" ? "rgba(34,197,94,0.12)" :
-                    status === "error" ? "rgba(239,68,68,0.12)" : "rgba(148,163,184,0.12)",
-          border: status === "success" ? "1px solid rgba(34,197,94,0.35)" :
-                status === "error" ? "1px solid rgba(239,68,68,0.35)" :
-                "1px solid rgba(148,163,184,0.25)"
-        }}>
-          <p style={{ margin: 0, marginBottom: "8px", fontWeight: 700 }}>Status: {status}</p>
-          <p style={{ margin: 0 }}>{message}</p>
-        </div>
+      {error && <div className="error-banner">{error}</div>}
 
-        <div style={{ marginTop: "20px", padding: "16px", borderRadius: "12px", background: "#0f172a", border: "1px solid #334155" }}>
-          <p style={{ margin: "0 0 8px 0" }}><strong>Host:</strong> {HOST}</p>
-          <p style={{ margin: "0 0 8px 0" }}><strong>Port:</strong> {PORT}</p>
-          <p style={{ margin: "0 0 8px 0" }}><strong>SSL:</strong> {USE_SSL ? "true" : "false"}</p>
-          <p style={{ margin: "0 0 8px 0" }}><strong>User ID:</strong> {userId || "-"}</p>
-          <p style={{ margin: "0 0 8px 0" }}><strong>Username:</strong> {finalUsername || "-"}</p>
-          <p style={{ margin: 0 }}><strong>Socket Connected:</strong> {socketConnected ? "Yes" : "No"}</p>
-        </div>
+      <div className="main-content">
+        {status && <div className="status">{status}</div>}
 
-        <div style={{ marginTop: "20px", fontSize: "14px", color: "#94a3b8", lineHeight: 1.6 }}>
-          <p style={{ margin: "0 0 6px 0" }}>✅ Stable device ID from localStorage</p>
-          <p style={{ margin: "0 0 6px 0" }}>✅ Fixed: All TypeScript errors resolved</p>
-          <p style={{ margin: "0 0 6px 0" }}>✅ Fixed: Proper dependency arrays</p>
-          <p style={{ margin: 0 }}>✅ Connects Render WSS ↔ Netlify HTTPS</p>
-        </div>
+        {!session ? (
+          <div className="login-screen">
+            <h2>Join the Game</h2>
+            <p className="subtitle">Enter your name to connect</p>
+            <input
+              className="username-input"
+              placeholder="Enter name"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+            />
+            <button className="connect-btn" onClick={connectToNakama}>
+              Connect
+            </button>
+          </div>
+        ) : !match ? (
+          <div className="matchmaking-screen">
+            <h2>Welcome, {username}</h2>
+            <p className="subtitle">You are connected. Find a player to start.</p>
+            <button className="find-match-btn" onClick={findMatch}>
+              Find Match
+            </button>
+          </div>
+        ) : (
+          <div className="game-screen">
+            <h2>Match in Progress</h2>
+
+            <div className="players">
+              <div className="player me">
+                <span className="symbol">You</span>
+                <span className="name">{username}</span>
+              </div>
+            </div>
+
+            <div className="game-board">
+              {gameState?.board.map((cell, i) => {
+                const clickable =
+                  !cell &&
+                  !gameState.gameOver &&
+                  gameState.currentPlayer === myUserId;
+
+                return (
+                  <button
+                    key={i}
+                    className={`cell ${cell ? 'filled' : ''} ${
+                      clickable ? 'active' : ''
+                    }`}
+                    onClick={() => makeMove(i)}
+                    disabled={!clickable}
+                  >
+                    {cell}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="game-controls">
+              <button className="leave-match-btn" onClick={leaveMatch}>
+                Leave Match
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="footer">
+        <p>Multiplayer Tic-Tac-Toe with Nakama</p>
       </div>
     </div>
   );
-}
+};
 
 export default App;
