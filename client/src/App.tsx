@@ -36,15 +36,15 @@ const App: React.FC = () => {
   const [status, setStatus] = useState('');
 
   const host =
-  process.env.REACT_APP_NAKAMA_HOST || 'tic-tac-toe-nakama-1-osku.onrender.com';
+    process.env.REACT_APP_NAKAMA_HOST || 'tic-tac-toe-nakama-1-osku.onrender.com';
 
-const port =
-  process.env.REACT_APP_NAKAMA_PORT || '443';  // ✅ Fixed: string, not number
+  const port =
+    process.env.REACT_APP_NAKAMA_PORT || '443';
 
-const useSSL =
-  process.env.REACT_APP_NAKAMA_SSL
-    ? process.env.REACT_APP_NAKAMA_SSL === 'true'
-    : true;
+  const useSSL =
+    process.env.REACT_APP_NAKAMA_SSL
+      ? process.env.REACT_APP_NAKAMA_SSL === 'true'
+      : true;
 
   useEffect(() => {
     const nakamaClient = new Client('defaultkey', host, port, useSSL);
@@ -91,12 +91,24 @@ const useSSL =
       setStatus('Opponent joined!');
     };
 
+    const handleChannelMessage = (message: any) => {
+      console.log('Channel message:', message);
+    };
+
+    const handleNotification = (notification: any) => {
+      console.log('Notification:', notification);
+    };
+
     socket.onmatchdata = handleMatchData;
     socket.onmatchpresence = handleMatchPresence;
+    socket.onchannelmessage = handleChannelMessage;
+    socket.onnotification = handleNotification;
 
     return () => {
       socket.onmatchdata = (_matchData: MatchData) => {};
       socket.onmatchpresence = (_presenceEvent: MatchPresenceEvent) => {};
+      socket.onchannelmessage = (_message: any) => {};
+      socket.onnotification = (_notification: any) => {};
     };
   }, [myUserId]);
 
@@ -106,7 +118,7 @@ const useSSL =
 
     if (!id) {
       id =
-        typeof crypto !== 'undefined' && crypto.randomUUID
+        typeof crypto !== 'undefined' && 'randomUUID' in crypto
           ? crypto.randomUUID()
           : `device-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       localStorage.setItem(key, id);
@@ -130,12 +142,18 @@ const useSSL =
 
       const newSession = await client.authenticateDevice(
         deviceId,
-        true,
-        cleanUsername
+        cleanUsername,
+        true
       );
 
       setSession(newSession);
-      setMyUserId(newSession.user_id || '');
+
+      const resolvedUserId =
+        (newSession as any).user_id ||
+        (newSession as any).userId ||
+        '';
+
+      setMyUserId(resolvedUserId);
       setStatus('Connected successfully');
 
       if (socketRef.current) {
@@ -163,14 +181,22 @@ const useSSL =
       setError(null);
       setStatus('Searching for opponent...');
 
-      // ✅ FIXED: Changed '{}' to {} (object instead of string)
       const rpc: any = await client.rpc(session, 'find_match', {});
       console.log('Raw RPC response:', rpc);
 
-      const payload = typeof rpc?.payload === 'string' ? rpc.payload : '{}';
-      console.log('Raw RPC payload string:', payload);
+      let parsed: any = {};
 
-      const parsed = JSON.parse(payload);
+      if (typeof rpc?.payload === 'string') {
+        console.log('Raw RPC payload string:', rpc.payload);
+        parsed = JSON.parse(rpc.payload || '{}');
+      } else if (rpc?.payload && typeof rpc.payload === 'object') {
+        console.log('Raw RPC payload object:', rpc.payload);
+        parsed = rpc.payload;
+      } else {
+        console.log('RPC payload missing, checking root object');
+        parsed = rpc || {};
+      }
+
       console.log('Parsed RPC payload:', parsed);
 
       const matchId =
