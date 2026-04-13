@@ -91,6 +91,20 @@ function parseMove(
   return JSON.parse(raw);
 }
 
+function extractMatchId(matchObj: any): string {
+  if (!matchObj) return '';
+
+  if (typeof matchObj === 'string') return matchObj;
+
+  return (
+    matchObj.matchId ||
+    matchObj.match_id ||
+    matchObj.matchid ||
+    matchObj.id ||
+    ''
+  );
+}
+
 // Match init
 const matchInit: nkruntime.MatchInitFunction<TicTacToeState> = function (
   ctx,
@@ -299,7 +313,15 @@ const rpcCreateMatch: nkruntime.RpcFunction = function (
   nk,
   payload
 ): string {
-  const matchId = nk.matchCreate(moduleName, {});
+  const created: any = nk.matchCreate(moduleName, {});
+  const matchId = extractMatchId(created);
+
+  logger.info('rpcCreateMatch returning matchId=%s', matchId || 'undefined');
+
+  if (!matchId) {
+    throw new Error('Failed to create match: no matchId returned');
+  }
+
   return JSON.stringify({ matchId });
 };
 
@@ -317,18 +339,41 @@ const rpcFindMatch: nkruntime.RpcFunction = function (
   const maxSize = 2;
   const query = '+label.open:>=1';
 
-  const matches = nk.matchList(limit, isAuthoritative, label, minSize, maxSize, query);
+  const matches = nk.matchList(
+    limit,
+    isAuthoritative,
+    label,
+    minSize,
+    maxSize,
+    query
+  );
+
+  logger.info('find_match: found %d candidate matches', matches.length);
 
   if (matches.length > 0) {
-    const first = matches[0] as any;
-    const matchId = first.matchId || first.match_id;
-    if (matchId) {
-      return JSON.stringify({ matchId });
+    const first: any = matches[0];
+    const foundMatchId = extractMatchId(first);
+
+    logger.info('find_match: existing matchId=%s', foundMatchId || 'undefined');
+
+    if (foundMatchId) {
+      return JSON.stringify({ matchId: foundMatchId });
     }
   }
 
-  const matchId = nk.matchCreate(moduleName, {});
-  return JSON.stringify({ matchId });
+  const created: any = nk.matchCreate(moduleName, {});
+  const createdMatchId = extractMatchId(created);
+
+  logger.info(
+    'find_match: created new matchId=%s',
+    createdMatchId || 'undefined'
+  );
+
+  if (!createdMatchId) {
+    throw new Error('find_match failed: no matchId returned from matchCreate');
+  }
+
+  return JSON.stringify({ matchId: createdMatchId });
 };
 
 // Init module
