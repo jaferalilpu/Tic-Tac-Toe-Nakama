@@ -1,154 +1,231 @@
-# Tic-Tac-Toe Multiplayer (Nakama + React)
+# Tic-Tac-Toe Multiplayer
 
-**Live Game:**
-[https://tic-tac-toe-multiplayer-nakama.vercel.app/](https://tic-tac-toe-multiplayer-nakama.vercel.app/)
+A full-stack multiplayer Tic-Tac-Toe game built with **React + TypeScript** on the frontend and **Nakama authoritative matches** on the backend.
 
-**Backend (Nakama):**
-[https://nakama-tic-tac-toe.onrender.com](https://nakama-tic-tac-toe.onrender.com)
+## Project structure
 
-**Source Code:**
-[https://github.com/UnfazedHope/tic-tac-toe-multiplayer](https://github.com/UnfazedHope/tic-tac-toe-multiplayer)
-
----
-
-## 1. Setup & Installation Instructions
-
-```bash
-git clone https://github.com/UnfazedHope/tic-tac-toe-multiplayer.git
-cd tic-tac-toe-multiplayer
-
-# Start Nakama + Postgres locally (requires Docker)
-docker-compose up --build
-
-# Frontend
-cd client
-npm install
-
-# Local environment vars:
-# REACT_APP_NAKAMA_HOST=localhost
-# REACT_APP_NAKAMA_PORT=7350
-# REACT_APP_NAKAMA_SSL=false
-
-npm start
-```
-
-Project Structure Setup
-
-Create the following directory structure:
-
-<pre>
-tictactoe-nakama/
-├── docker-compose.yml
-├── server-data/
-│   ├── modules/
-│   └── logs/
-├── server-src/
-│   ├── main.ts
+```text
+.
+├── client/                    # React frontend
+│   ├── public/
+│   ├── src/
+│   │   ├── App.tsx
+│   │   ├── App.css
+│   │   ├── index.tsx
+│   │   └── ...
 │   ├── package.json
 │   └── tsconfig.json
-└── client/
-    └── (React app lives here)
-</pre>
-
----
-
-## 2. Architecture & Design Decisions
-
-* **Server-authoritative gameplay:** All logic (move validation, turn order, win/draw checks, timers) executes inside the Nakama authoritative match handler.
-* **Matchmaking via custom RPC (`find_match`):** Backend pairs players and creates matches dynamically.
-* **Real-time WebSocket messaging:** Clients communicate with Nakama using secure WebSockets (`wss://`). Backend sends authoritative `GameState` updates.
-* **Two modes supported:** Classic and Timed (server-enforced 30s per turn).
-* **Client is thin:** Only sends actions; server decides the outcome.
-
----
-
-## 3. Deployment Process Documentation
-
-### Backend (Nakama on Render)
-
-1. Create a **Web Service** from the GitHub repo.
-2. Add environment variables:
-
-   ```
-   DATABASE_URL=<Render Postgres URL>
-   ENCRYPTION_KEY=<openssl rand -hex 32>
-   PORT=7350
-   ```
-3. Custom Start Command:
-
-**Advanced Settings:**
-- **Docker Command**: `/nakama/start-nakama.sh` (already in Dockerfile)
-- **Health Check Path**: `/` (leave default)
-
-4. Deploy and check logs for:
-   **"Tic-Tac-Toe module loaded successfully!"**
-
-Backend endpoint: [https://nakama-tic-tac-toe.onrender.com](https://nakama-tic-tac-toe.onrender.com)
-
----
-
-### Frontend (React on Vercel)
-
-Add environment variables:
-
+├── server-src/                # Nakama TypeScript runtime source
+│   ├── main.ts
+│   ├── nakama.d.ts
+│   ├── package.json
+│   └── tsconfig.json
+├── server-data/               # Local Nakama data, logs, modules
+│   ├── logs/
+│   └── modules/
+├── docker-compose.yml         # Local Nakama + Postgres setup
+├── Dockerfile                 # Backend image build file
+├── start-nakama.sh            # Helper script to start services
+├── package.json               # Root package config
+└── README.md
 ```
-REACT_APP_NAKAMA_HOST=nakama-tic-tac-toe.onrender.com
+
+## Tech stack
+
+### Frontend
+- React
+- TypeScript
+- CSS
+- Netlify deployment
+
+### Backend
+- Nakama
+- TypeScript runtime
+- Docker
+- Docker Compose
+- PostgreSQL
+- Render deployment
+
+## URLs
+
+### Frontend URL
+Add your deployed Netlify URL here:
+
+```text
+In My Case URL="https://tic-tac-toe-usingnakama.netlify.app/"
+```
+
+### Backend URL
+Add your deployed Nakama / Render backend URL here:
+
+```text
+In My Case URL="https://tic-tac-toe-nakama-1-osku.onrender.com"
+```
+
+## Environment variables
+
+Create a `.env` file inside `client/`:
+
+```env
+REACT_APP_NAKAMA_HOST=Backend URL Exclude HTTP/HTTPS
 REACT_APP_NAKAMA_PORT=443
 REACT_APP_NAKAMA_SSL=true
 ```
 
-Vercel automatically builds & deploys the game.
+## Installation
 
----
+## Root setup
 
-## 4. API / Server Configuration Details
-
-### Custom RPCs
-
-| RPC            | Description                                         |
-| -------------- | --------------------------------------------------- |
-| `find_match`   | Returns or creates a match and provides a `matchId` |
-| `create_match` | Internal helper used during matchmaking             |
-
-### Match Opcodes
-
-| Opcode | Direction       | Description                              |
-| ------ | --------------- | ---------------------------------------- |
-| `1`    | Server → Client | Full authoritative `GameState` broadcast |
-| `2`    | Client → Server | Player move `{ position }`               |
-| `3`    | Client → Server | Reset match                              |
-| `4`    | Server → Client | Error message                            |
-| `5`    | Server → Client | Turn timeout event                       |
-
-### Example `GameState`
-
-```json
-{
-  "board": ["X", null, "O", ...],
-  "currentPlayer": "userId",
-  "players": { "uidA": "X", "uidB": "O" },
-  "winner": null,
-  "gameOver": false,
-  "moveCount": 4,
-  "timedMode": true,
-  "timeLeft": 29
-}
+```bash
+npm install
 ```
 
----
+## Frontend setup
 
-## 5. How to Test Multiplayer Functionality
+```bash
+cd client
+npm install
+```
 
-1. Open **two browsers**, **browser + incognito**, **two devices** or **share the link with a friend**.
-2. Go to: [https://tic-tac-toe-multiplayer-nakama.vercel.app/](https://tic-tac-toe-multiplayer-nakama.vercel.app/)
-3. Enter two different usernames → click **Connect**.
-4. Press **Find Match** on both.
-5. Confirm:
-   * Both players join the same match.
-   * Moves sync instantly across clients.
-   * Out-of-turn moves are rejected (server opcode `4`).
-   * Timeouts trigger auto-loss in timed mode.
-   * Win/Loss UI updates correctly.
-6. Click **Play Again** to reset the match and start a new round.
+## Backend setup
 
----
+```bash
+cd server-src
+npm install
+```
+
+## Run locally
+
+## Start Nakama backend with Docker
+
+From the project root:
+
+```bash
+docker-compose up -d
+```
+
+Or if you use the helper script:
+
+```bash
+bash start-nakama.sh
+```
+
+## Run frontend
+
+```bash
+cd client
+npm start
+```
+
+Frontend usually runs on:
+
+```text
+http://localhost:3000
+```
+
+## Build commands
+
+## Frontend build
+
+```bash
+cd client
+npm run build
+```
+
+## Backend TypeScript build
+
+```bash
+cd server-src
+npm run build
+```
+
+## Deployment
+
+## Deploy frontend to Netlify
+
+- Base directory: `client`
+- Build command: `npm run build`
+- Publish directory: `client/build`
+
+Set these environment variables in Netlify:
+
+```env
+REACT_APP_NAKAMA_HOST=your-render-service.onrender.com
+REACT_APP_NAKAMA_PORT=443
+REACT_APP_NAKAMA_SSL=true
+```
+
+## Deploy backend to Render
+
+Deploy the Nakama backend service on Render and expose the server with HTTPS.
+
+Use your Render backend domain in the frontend env variables.
+
+## Important notes
+
+- `client/src/App.tsx` contains the main frontend game logic.
+- `server-src/main.ts` contains Nakama authoritative match logic and RPC functions.
+- Use `wss` / SSL in production.
+- Keep `REACT_APP_NAKAMA_PORT` as `443` for production HTTPS/WSS.
+- Make sure frontend and backend are aligned for RPC response format.
+
+## Common commands
+
+### Install dependencies
+
+```bash
+npm install
+cd client && npm install
+cd ../server-src && npm install
+```
+
+### Start Docker services
+
+```bash
+docker-compose up -d
+```
+
+### Stop Docker services
+
+```bash
+docker-compose down
+```
+
+### Frontend dev server
+
+```bash
+cd client
+npm start
+```
+
+### Frontend production build
+
+```bash
+cd client
+npm run build
+```
+
+### Backend build
+
+```bash
+cd server-src
+npm run build
+```
+
+## Suggested clean structure
+
+For a neat project, keep this convention:
+
+- `client/` only for React frontend
+- `server-src/` only for Nakama backend source
+- `server-data/` only for runtime data, compiled modules, and logs
+- Root folder only for Docker, scripts, and project-level docs
+
+## Final checklist
+
+- Frontend env file configured
+- Backend URL updated
+- Netlify env variables added
+- Render backend deployed
+- `App.tsx` and `main.ts` aligned
+- Docker setup working locally
