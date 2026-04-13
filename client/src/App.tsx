@@ -15,6 +15,7 @@ interface GameState {
   players: Record<string, string>;
   winner: string | null;
   gameOver: boolean;
+  moveCount: number;
 }
 
 interface MatchInfo {
@@ -35,14 +36,15 @@ const App: React.FC = () => {
   const [status, setStatus] = useState('');
 
   const host =
-    process.env.REACT_APP_NAKAMA_HOST || 'tic-tac-toe-nakama-1-osku.onrender.com';
+  process.env.REACT_APP_NAKAMA_HOST || 'tic-tac-toe-nakama-1-osku.onrender.com';
 
-  const port = process.env.REACT_APP_NAKAMA_PORT || '443';
+const port =
+  process.env.REACT_APP_NAKAMA_PORT || '443';  // ✅ Fixed: string, not number
 
-  const useSSL =
-    process.env.REACT_APP_NAKAMA_SSL
-      ? process.env.REACT_APP_NAKAMA_SSL === 'true'
-      : true;
+const useSSL =
+  process.env.REACT_APP_NAKAMA_SSL
+    ? process.env.REACT_APP_NAKAMA_SSL === 'true'
+    : true;
 
   useEffect(() => {
     const nakamaClient = new Client('defaultkey', host, port, useSSL);
@@ -161,22 +163,26 @@ const App: React.FC = () => {
       setError(null);
       setStatus('Searching for opponent...');
 
+      // ✅ FIXED: Changed '{}' to {} (object instead of string)
       const rpc: any = await client.rpc(session, 'find_match', {});
+      console.log('Raw RPC response:', rpc);
+
       const payload = typeof rpc?.payload === 'string' ? rpc.payload : '{}';
+      console.log('Raw RPC payload string:', payload);
+
       const parsed = JSON.parse(payload);
+      console.log('Parsed RPC payload:', parsed);
 
       const matchId =
         parsed.matchId ||
         parsed.match_id ||
-        parsed.matchid ||
         (Array.isArray(parsed.matchIds) ? parsed.matchIds[0] : undefined);
 
       if (!matchId) {
-        console.error('RPC payload received:', parsed);
         throw new Error('No valid match ID returned from RPC');
       }
 
-      const joined = await socketRef.current.joinMatch(matchId);
+      const joined = await socketRef.current.joinMatch(String(matchId));
       setMatch({ match_id: joined.match_id });
       setStatus('Match found! Game starts soon...');
     } catch (err: any) {
