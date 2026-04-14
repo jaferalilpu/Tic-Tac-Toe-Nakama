@@ -17,14 +17,6 @@ interface MatchState {
   open: boolean;
 }
 
-interface RpcFindMatchRequest {
-  create?: boolean;
-}
-
-interface RpcFindMatchResponse {
-  matchId: string;
-}
-
 function createBoard(): Mark[] {
   return ["", "", "", "", "", "", "", "", ""];
 }
@@ -68,7 +60,7 @@ function resetGame(state: MatchState): void {
   state.currentTurn = "X";
   state.winner = "";
   state.started = state.playerX !== null && state.playerO !== null;
-  state.open = !(state.playerX !== null && state.playerO !== null);
+  state.open = !state.started;
 }
 
 function buildLabel(state: MatchState): string {
@@ -90,7 +82,7 @@ function buildStatePayload(state: MatchState): string {
   });
 }
 
-function broadcastGameState(
+function broadcastState(
   dispatcher: nkruntime.MatchDispatcher,
   state: MatchState
 ): void {
@@ -107,18 +99,18 @@ const rpcFindMatch: nkruntime.RpcFunction = function (
     throw new Error("No user ID in context.");
   }
 
-  let request: RpcFindMatchRequest = {};
-  if (payload) {
+  let request: any = {};
+  if (payload && payload.trim()) {
     try {
       request = JSON.parse(payload);
-    } catch (error) {
-      logger.warn("Failed to parse find_match payload, using defaults.");
+    } catch (e) {
+      logger.warn("Invalid RPC payload.");
     }
   }
 
   let matches: nkruntime.Match[] = [];
   try {
-    matches = nk.matchList(10, true, MODULE_NAME, 0, 1, "+label.open:1");
+    matches = nk.matchList(10, true, MODULE_NAME, 0, 2, "+label.open:1");
   } catch (error) {
     logger.error("Error listing matches: %v", error);
     throw error;
@@ -127,22 +119,20 @@ const rpcFindMatch: nkruntime.RpcFunction = function (
   if (matches.length > 0) {
     const existingMatchId = matches[0].matchId;
     logger.info("Found open match: %s", existingMatchId);
-    const response: RpcFindMatchResponse = { matchId: existingMatchId };
-    return JSON.stringify(response);
+    return JSON.stringify({ matchId: existingMatchId });
   }
 
   try {
     const newMatchId = nk.matchCreate(MODULE_NAME, {});
     logger.info("Created new match: %s", newMatchId);
-    const response: RpcFindMatchResponse = { matchId: newMatchId };
-    return JSON.stringify(response);
+    return JSON.stringify({ matchId: newMatchId });
   } catch (error) {
     logger.error("Error creating match: %v", error);
     throw error;
   }
 };
 
-let matchInit = function (
+const matchInit: nkruntime.MatchInitFunction<MatchState> = function (
   ctx: nkruntime.Context,
   logger: nkruntime.Logger,
   nk: nkruntime.Nakama,
@@ -170,7 +160,7 @@ let matchInit = function (
   };
 };
 
-let matchJoinAttempt = function (
+const matchJoinAttempt: nkruntime.MatchJoinAttemptFunction<MatchState> = function (
   ctx: nkruntime.Context,
   logger: nkruntime.Logger,
   nk: nkruntime.Nakama,
@@ -198,7 +188,7 @@ let matchJoinAttempt = function (
   };
 };
 
-let matchJoin = function (
+const matchJoin: nkruntime.MatchJoinFunction<MatchState> = function (
   ctx: nkruntime.Context,
   logger: nkruntime.Logger,
   nk: nkruntime.Nakama,
@@ -234,12 +224,12 @@ let matchJoin = function (
   }
 
   dispatcher.matchLabelUpdate(buildLabel(state));
-  broadcastGameState(dispatcher, state);
+  broadcastState(dispatcher, state);
 
   return { state };
 };
 
-let matchLeave = function (
+const matchLeave: nkruntime.MatchLeaveFunction<MatchState> = function (
   ctx: nkruntime.Context,
   logger: nkruntime.Logger,
   nk: nkruntime.Nakama,
@@ -263,21 +253,19 @@ let matchLeave = function (
     }
   }
 
-  if (state.playerX === null || state.playerO === null) {
-    state.started = false;
-    state.open = true;
-    state.board = createBoard();
-    state.currentTurn = "X";
-    state.winner = "";
-  }
+  state.started = false;
+  state.open = true;
+  state.board = createBoard();
+  state.currentTurn = "X";
+  state.winner = "";
 
   dispatcher.matchLabelUpdate(buildLabel(state));
-  broadcastGameState(dispatcher, state);
+  broadcastState(dispatcher, state);
 
   return { state };
 };
 
-let matchLoop = function (
+const matchLoop: nkruntime.MatchLoopFunction<MatchState> = function (
   ctx: nkruntime.Context,
   logger: nkruntime.Logger,
   nk: nkruntime.Nakama,
@@ -296,7 +284,7 @@ let matchLoop = function (
         state.open = false;
         dispatcher.matchLabelUpdate(buildLabel(state));
         logger.info("Game restarted.");
-        broadcastGameState(dispatcher, state);
+        broadcastState(dispatcher, state);
       }
       continue;
     }
@@ -353,13 +341,13 @@ let matchLoop = function (
       state.currentTurn = state.currentTurn === "X" ? "O" : "X";
     }
 
-    broadcastGameState(dispatcher, state);
+    broadcastState(dispatcher, state);
   }
 
   return { state };
 };
 
-let matchTerminate = function (
+const matchTerminate: nkruntime.MatchTerminateFunction<MatchState> = function (
   ctx: nkruntime.Context,
   logger: nkruntime.Logger,
   nk: nkruntime.Nakama,
