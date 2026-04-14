@@ -1,42 +1,26 @@
-/// <reference path="./nakama.d.ts" />
+const MODULE_NAME = "tic_tac_toe";
+const TICK_RATE = 1;
 
-const MODULE_NAME = "tic-tac-toe-match";
+type Mark = "" | "X" | "O";
+type Winner = "" | "X" | "O" | "Draw";
 
-type PresenceState = {
-  userId: string;
-  sessionId: string;
-  username: string;
-  mark: "X" | "O";
-};
-
-type MatchState = {
-  presences: { [sessionId: string]: PresenceState };
+interface MatchState {
+  presences: { [userId: string]: nkruntime.Presence };
   joinsInProgress: number;
-  board: string[];
-  currentTurn: "X" | "O";
-  winner: string | null;
+  board: Mark[];
   playerX: string | null;
   playerO: string | null;
-};
+  currentTurn: Mark;
+  winner: Winner;
+  started: boolean;
+}
 
-const OpCode = {
-  START: 1,
-  MOVE: 2,
-  STATE: 3,
-  ERROR: 4,
-};
+function createBoard(): Mark[] {
+  return ["", "", "", "", "", "", "", "", ""];
+}
 
-const createStatePayload = (state: MatchState): string =>
-  JSON.stringify({
-    board: state.board,
-    currentTurn: state.currentTurn,
-    winner: state.winner,
-    playerX: state.playerX,
-    playerO: state.playerO,
-  });
-
-const checkWinner = (board: string[]): string | null => {
-  const lines = [
+function checkWinner(board: Mark[]): Winner {
+  const lines: number[][] = [
     [0, 1, 2],
     [3, 4, 5],
     [6, 7, 8],
@@ -47,45 +31,79 @@ const checkWinner = (board: string[]): string | null => {
     [2, 4, 6],
   ];
 
-  for (const [a, b, c] of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const [a, b, c] = lines[i];
     if (board[a] !== "" && board[a] === board[b] && board[a] === board[c]) {
       return board[a];
     }
   }
 
-  if (board.every((cell) => cell !== "")) {
-    return "draw";
+  for (let i = 0; i < board.length; i++) {
+    if (board[i] === "") {
+      return "";
+    }
   }
 
-  return null;
-};
+  return "Draw";
+}
 
-const matchInit = function (
+function getMark(state: MatchState, userId: string): Mark {
+  if (state.playerX === userId) {
+    return "X";
+  }
+
+  if (state.playerO === userId) {
+    return "O";
+  }
+
+  return "";
+}
+
+function buildStatePayload(state: MatchState): string {
+  return JSON.stringify({
+    board: state.board,
+    playerX: state.playerX,
+    playerO: state.playerO,
+    currentTurn: state.currentTurn,
+    winner: state.winner,
+    started: state.started,
+  });
+}
+
+function broadcastGameState(
+  dispatcher: nkruntime.MatchDispatcher,
+  state: MatchState
+): void {
+  dispatcher.broadcastMessage(3, buildStatePayload(state), null, null);
+}
+
+let matchInit = function (
   ctx: nkruntime.Context,
   logger: nkruntime.Logger,
   nk: nkruntime.Nakama,
-  params: { [key: string]: any }
-) {
+  params: { [key: string]: string }
+): { state: MatchState; tickRate: number; label: string } {
   const state: MatchState = {
     presences: {},
     joinsInProgress: 0,
-    board: ["", "", "", "", "", "", "", "", ""],
-    currentTurn: "X",
-    winner: null,
+    board: createBoard(),
     playerX: null,
     playerO: null,
+    currentTurn: "X",
+    winner: "",
+    started: false,
   };
 
-  logger.info("Match initialized.");
+  logger.info("Tic-tac-toe match created.");
 
   return {
-    state,
-    tickRate: 1,
+    state: state,
+    tickRate: TICK_RATE,
     label: "tic-tac-toe",
   };
 };
 
-const matchJoinAttempt = function (
+let matchJoinAttempt = function (
   ctx: nkruntime.Context,
   logger: nkruntime.Logger,
   nk: nkruntime.Nakama,
@@ -94,20 +112,26 @@ const matchJoinAttempt = function (
   state: MatchState,
   presence: nkruntime.Presence,
   metadata: { [key: string]: any }
-) {
-  if (Object.keys(state.presences).length + state.joinsInProgress >= 2) {
+): { state: MatchState; accept: boolean; rejectMessage?: string } {
+  const currentSize = Object.keys(state.presences).length + state.joinsInProgress;
+
+  if (currentSize >= 2) {
     return {
-      state,
+      state: state,
       accept: false,
       rejectMessage: "Match is full.",
     };
   }
 
-  state.joinsInProgress++;
-  return { state, accept: true };
+  state.joinsInProgress += 1;
+
+  return {
+    state: state,
+    accept: true,
+  };
 };
 
-const matchJoin = function (
+let matchJoin = function (
   ctx: nkruntime.Context,
   logger: nkruntime.Logger,
   nk: nkruntime.Nakama,
@@ -115,49 +139,35 @@ const matchJoin = function (
   tick: number,
   state: MatchState,
   presences: nkruntime.Presence[]
-) {
-  for (const presence of presences) {
+): { state: MatchState } {
+  for (let i = 0; i < presences.length; i++) {
+    const presence = presences[i];
+    state.presences[presence.userId] = presence;
     state.joinsInProgress = Math.max(0, state.joinsInProgress - 1);
 
-    let mark: "X" | "O" = "X";
-
-    if (!state.playerX) {
-      state.playerX = presence.username;
-      mark = "X";
-    } else if (!state.playerO) {
-      state.playerO = presence.username;
-      mark = "O";
-    } else {
-      continue;
+    if (state.playerX === null) {
+      state.playerX = presence.userId;
+    } else if (state.playerO === null && presence.userId !== state.playerX) {
+      state.playerO = presence.userId;
     }
-
-    state.presences[presence.sessionId] = {
-      userId: presence.userId,
-      sessionId: presence.sessionId,
-      username: presence.username,
-      mark,
-    };
   }
 
-  dispatcher.broadcastMessage(OpCode.STATE, createStatePayload(state));
-
-  if (Object.keys(state.presences).length === 2) {
-    dispatcher.broadcastMessage(
-      OpCode.START,
-      JSON.stringify({
-        message: "Match started",
-        board: state.board,
-        currentTurn: state.currentTurn,
-        playerX: state.playerX,
-        playerO: state.playerO,
-      })
-    );
+  if (state.playerX !== null && state.playerO !== null) {
+    state.started = true;
+    state.currentTurn = "X";
+    state.winner = "";
+    state.board = createBoard();
+    logger.info("Game started.");
   }
 
-  return { state };
+  broadcastGameState(dispatcher, state);
+
+  return {
+    state: state,
+  };
 };
 
-const matchLeave = function (
+let matchLeave = function (
   ctx: nkruntime.Context,
   logger: nkruntime.Logger,
   nk: nkruntime.Nakama,
@@ -165,20 +175,35 @@ const matchLeave = function (
   tick: number,
   state: MatchState,
   presences: nkruntime.Presence[]
-) {
-  for (const presence of presences) {
-    delete state.presences[presence.sessionId];
+): { state: MatchState } {
+  for (let i = 0; i < presences.length; i++) {
+    const presence = presences[i];
+    delete state.presences[presence.userId];
+
+    if (state.playerX === presence.userId) {
+      state.playerX = null;
+    }
+
+    if (state.playerO === presence.userId) {
+      state.playerO = null;
+    }
   }
 
-  if (Object.keys(state.presences).length === 0) {
-    logger.info("Match terminated because all players left.");
-    return null;
+  if (state.playerX === null || state.playerO === null) {
+    state.started = false;
+    state.board = createBoard();
+    state.currentTurn = "X";
+    state.winner = "";
   }
 
-  return { state };
+  broadcastGameState(dispatcher, state);
+
+  return {
+    state: state,
+  };
 };
 
-const matchLoop = function (
+let matchLoop = function (
   ctx: nkruntime.Context,
   logger: nkruntime.Logger,
   nk: nkruntime.Nakama,
@@ -186,63 +211,67 @@ const matchLoop = function (
   tick: number,
   state: MatchState,
   messages: nkruntime.MatchMessage[]
-) {
-  for (const message of messages) {
-    if (message.opCode !== OpCode.MOVE) {
+): { state: MatchState } {
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i];
+    const userId = message.sender.userId;
+    const mark = getMark(state, userId);
+
+    if (state.started === false) {
       continue;
     }
 
-    if (state.winner) {
-      dispatcher.broadcastMessage(
-        OpCode.ERROR,
-        JSON.stringify({ message: "Game already finished." }),
-        [message.sender]
-      );
+    if (state.winner !== "") {
       continue;
     }
 
-    const sender = state.presences[message.sender.sessionId];
-    if (!sender) {
+    if (mark === "") {
       continue;
     }
 
-    if (sender.mark !== state.currentTurn) {
-      dispatcher.broadcastMessage(
-        OpCode.ERROR,
-        JSON.stringify({ message: "Not your turn." }),
-        [message.sender]
-      );
+    if (mark !== state.currentTurn) {
       continue;
     }
 
-    const payload = JSON.parse(nk.binaryToString(message.data));
-    const index = Number(payload.index);
+    let parsed: { position?: number } = {};
 
-    if (Number.isNaN(index) || index < 0 || index > 8 || state.board[index] !== "") {
-      dispatcher.broadcastMessage(
-        OpCode.ERROR,
-        JSON.stringify({ message: "Invalid move." }),
-        [message.sender]
-      );
+    try {
+      parsed = JSON.parse(nk.binaryToString(message.data));
+    } catch (e) {
+      logger.warn("Invalid JSON payload.");
       continue;
     }
 
-    state.board[index] = sender.mark;
+    const position = parsed.position;
 
-    const result = checkWinner(state.board);
-    if (result) {
-      state.winner = result;
-    } else {
+    if (typeof position !== "number") {
+      continue;
+    }
+
+    if (position < 0 || position > 8) {
+      continue;
+    }
+
+    if (state.board[position] !== "") {
+      continue;
+    }
+
+    state.board[position] = mark;
+    state.winner = checkWinner(state.board);
+
+    if (state.winner === "") {
       state.currentTurn = state.currentTurn === "X" ? "O" : "X";
     }
 
-    dispatcher.broadcastMessage(OpCode.STATE, createStatePayload(state));
+    broadcastGameState(dispatcher, state);
   }
 
-  return { state };
+  return {
+    state: state,
+  };
 };
 
-const matchTerminate = function (
+let matchTerminate = function (
   ctx: nkruntime.Context,
   logger: nkruntime.Logger,
   nk: nkruntime.Nakama,
@@ -250,13 +279,12 @@ const matchTerminate = function (
   tick: number,
   state: MatchState,
   graceSeconds: number
-) {
-  dispatcher.broadcastMessage(
-    OpCode.ERROR,
-    JSON.stringify({ message: "Match is terminating." })
-  );
+): { state: MatchState } {
+  logger.info("Match terminated.");
 
-  return { state };
+  return {
+    state: state,
+  };
 };
 
 function InitModule(
@@ -264,15 +292,15 @@ function InitModule(
   logger: nkruntime.Logger,
   nk: nkruntime.Nakama,
   initializer: nkruntime.Initializer
-) {
+): void {
   initializer.registerMatch(MODULE_NAME, {
-    matchInit,
-    matchJoinAttempt,
-    matchJoin,
-    matchLeave,
-    matchLoop,
-    matchTerminate,
+    matchInit: matchInit,
+    matchJoinAttempt: matchJoinAttempt,
+    matchJoin: matchJoin,
+    matchLeave: matchLeave,
+    matchLoop: matchLoop,
+    matchTerminate: matchTerminate,
   });
 
-  logger.info("TicTacToe authoritative match module loaded.");
+  logger.info("Tic-tac-toe match handler registered.");
 }
