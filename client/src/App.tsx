@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState, useEffect } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Client, Session, Socket } from "@heroiclabs/nakama-js";
 
 type StatusType = "idle" | "loading" | "success" | "error";
@@ -10,31 +10,24 @@ const HOST =
 const PORT = process.env.REACT_APP_NAKAMA_PORT || "443";
 const USE_SSL = String(process.env.REACT_APP_NAKAMA_SSL || "true") === "true";
 
-const MOVE_OPCODE = 1;
+const EMPTY_BOARD: CellValue[] = ["", "", "", "", "", "", "", "", ""];
 
 function App() {
-  const [username, setUsername] = useState("jafer");
+  const [username, setUsername] = useState<string>("jafer");
   const [status, setStatus] = useState<StatusType>("idle");
-  const [message, setMessage] = useState(
+  const [message, setMessage] = useState<string>(
     "Login, then create or join a game."
   );
-
   const [session, setSession] = useState<Session | null>(null);
-  const [socketConnected, setSocketConnected] = useState(false);
-  const [userId, setUserId] = useState("");
-  const [finalUsername, setFinalUsername] = useState("");
-
-  const [matchId, setMatchId] = useState("");
-  const [joinMatchId, setJoinMatchId] = useState("");
-  const [board, setBoard] = useState<CellValue[]>([
-    "", "", "",
-    "", "", "",
-    "", "", "",
-  ]);
+  const [socketConnected, setSocketConnected] = useState<boolean>(false);
+  const [userId, setUserId] = useState<string>("");
+  const [finalUsername, setFinalUsername] = useState<string>("");
+  const [matchId, setMatchId] = useState<string>("");
+  const [joinMatchId, setJoinMatchId] = useState<string>("");
+  const [board, setBoard] = useState<CellValue[]>(EMPTY_BOARD);
   const [currentTurn, setCurrentTurn] = useState<"X" | "O">("X");
-  const [winner, setWinner] = useState("");
-  const [started, setStarted] = useState(false);
-  const [showDetails, setShowDetails] = useState(false);
+  const [winner, setWinner] = useState<string>("");
+  const [started, setStarted] = useState<boolean>(false);
 
   const socketRef = useRef<Socket | null>(null);
 
@@ -42,7 +35,7 @@ function App() {
     return new Client(SERVER_KEY, HOST, PORT, USE_SSL);
   }, []);
 
-  const getDeviceId = () => {
+  const getDeviceId = (): string => {
     const existing = localStorage.getItem("nakama-device-id");
     if (existing) return existing;
 
@@ -55,7 +48,7 @@ function App() {
     return newId;
   };
 
-  const sanitizeUsername = (value: string) => {
+  const sanitizeUsername = (value: string): string => {
     const cleaned = value
       .trim()
       .replace(/\s+/g, "_")
@@ -64,108 +57,212 @@ function App() {
     return cleaned || `player_${Math.random().toString(36).slice(2, 8)}`;
   };
 
-  const disconnectSocket = () => {
-    const socketAny = socketRef.current as any;
-    if (socketAny && typeof socketAny.disconnect === "function") {
-      socketAny.disconnect();
+  const resetBoard = (): void => {
+    setBoard(EMPTY_BOARD);
+    setCurrentTurn("X");
+    setWinner("");
+    setStarted(false);
+  };
+
+  const disconnectSocket = (): void => {
+    const socket = socketRef.current;
+    if (socket) {
+      const anySocket = socket as unknown as {
+        disconnect?: () => void;
+        close?: () => void;
+      };
+
+      if (typeof anySocket.disconnect === "function") anySocket.disconnect();
+      else if (typeof anySocket.close === "function") anySocket.close();
     }
+
     socketRef.current = null;
     setSocketConnected(false);
   };
 
-  const attachSocketEvents = (socket: any) => {
-    socket.ondisconnect = () => {
-      setSocketConnected(false);
-      setMessage("Socket disconnected.");
-    };
-
-    socket.onmatchdata = (matchState: any) => {
-      try {
-        const decoded =
-          typeof matchState.data === "string"
-            ? matchState.data
-            : new TextDecoder().decode(matchState.data);
-        const payload = JSON.parse(decoded);
-
-        if (payload.board) setBoard(payload.board);
-        if (payload.currentTurn) setCurrentTurn(payload.currentTurn);
-        if (typeof payload.winner === "string") setWinner(payload.winner);
-        if (typeof payload.started === "boolean") setStarted(payload.started);
-      } catch (e) {
-        console.error("Failed to parse match data", e);
-      }
-    };
-
-    socket.onmatchmakermatched = async (matched: any) => {
-      try {
-        const matchedResult = await socket.joinMatch(matched);
-        setMatchId(matchedResult.match_id || matchedResult.matchId || "");
-        setMessage("Player found and joined match successfully.");
-      } catch (err: any) {
-        setStatus("error");
-        setMessage(err?.message || "Failed to join matched game.");
-      }
-    };
-  };
-
-  const connectSocket = async (authSession: Session) => {
-    disconnectSocket();
-
-    const socket = client.createSocket(USE_SSL, false) as any;
-    attachSocketEvents(socket);
-
-    await socket.connect(authSession, true);
-    socketRef.current = socket as Socket;
-    return socket;
+  const syncAccountInfo = async (authSession: Session): Promise<void> => {
+    const account = await client.getAccount(authSession);
+    setFinalUsername(account?.user?.username || "");
+    setUserId(account?.user?.id || authSession.user_id || "");
   };
 
   const updateUsernameIfNeeded = async (
     authSession: Session,
     desiredUsername: string
-  ) => {
+  ): Promise<void> => {
     const safeName = sanitizeUsername(desiredUsername);
 
     try {
-      await (client as any).updateAccount(authSession, {
-        username: safeName,
-      });
-      setFinalUsername(safeName);
-      return safeName;
-    } catch (err) {
-      return (authSession as any).username || safeName;
+      await client.updateAccount(authSession, {
+  username: safeName,
+});
+    } catch (err: unknown) {
+      console.warn("updateAccount failed:", err);
     }
+
+    await syncAccountInfo(authSession);
   };
 
-  const handleLogin = async () => {
+  const attachSocketEvents = (socket: Socket): void => {
+    const anySocket = socket as unknown as {
+      ondisconnect?: (event?: unknown) => void;
+      onmatchdata?: (matchState: any) => void;
+      onmatchmakermatched?: (matched: any) => void;
+    };
+
+    anySocket.ondisconnect = () => {
+      setSocketConnected(false);
+      setMessage("Socket disconnected.");
+    };
+
+    anySocket.onmatchdata = (matchState: any) => {
+      try {
+        const decoded =
+          typeof matchState.data === "string"
+            ? matchState.data
+            : new TextDecoder().decode(matchState.data);
+
+        const payload = JSON.parse(decoded);
+
+        if (Array.isArray(payload.board)) setBoard(payload.board);
+        if (payload.currentTurn === "X" || payload.currentTurn === "O") {
+          setCurrentTurn(payload.currentTurn);
+        }
+        if (typeof payload.winner === "string") setWinner(payload.winner);
+        if (typeof payload.started === "boolean") setStarted(payload.started);
+      } catch (err) {
+        console.error("Failed to parse match data:", err);
+      }
+    };
+
+    anySocket.onmatchmakermatched = async (matched: any) => {
+      try {
+        const joined = await (socket as any).joinMatch(matched);
+        setMatchId(joined.match_id || joined.matchId || joined.id || "");
+        resetBoard();
+        setStarted(true);
+        setStatus("success");
+        setMessage("Match found and joined successfully.");
+      } catch (err: unknown) {
+        console.error("Matchmaker join failed:", err);
+        setStatus("error");
+        setMessage("Failed to join matched game.");
+      }
+    };
+  };
+
+  const connectSocket = async (authSession: Session): Promise<Socket> => {
+    disconnectSocket();
+
+    const socket = client.createSocket(USE_SSL, false);
+    attachSocketEvents(socket);
+
+    await socket.connect(authSession, true);
+    socketRef.current = socket;
+    setSocketConnected(true);
+    return socket;
+  };
+
+  const handleLogin = async (): Promise<void> => {
     setStatus("loading");
     setMessage("Authenticating with Nakama...");
 
     try {
       const deviceId = getDeviceId();
-      const authSession = await client.authenticateDevice(deviceId, true);
+      const safeName = sanitizeUsername(username);
 
-      setSession(authSession);
-      setUserId((authSession as any).user_id || "");
-      setFinalUsername((authSession as any).username || "");
-
-      const resolvedUsername = await updateUsernameIfNeeded(
-        authSession,
-        username
+      const authSession = await client.authenticateDevice(
+        deviceId,
+        true,
+        safeName
       );
 
+      setSession(authSession);
+      setUserId(authSession.user_id || "");
+
+      await updateUsernameIfNeeded(authSession, safeName);
       await connectSocket(authSession);
 
-      setSocketConnected(true);
-      setFinalUsername(resolvedUsername || (authSession as any).username || "");
       setStatus("success");
       setMessage("Connected successfully. You can now create or join a game.");
-    } catch (error: any) {
+    } catch (err: unknown) {
+      console.error("Login error:", err);
+      const e = err as { message?: string };
       setStatus("error");
-      setMessage(error?.message || "Authentication failed.");
+      setMessage(e?.message || "Authentication failed.");
     }
   };
 
-  const handleResetDevice = () => {
+  const handleCreateMatch = async (): Promise<void> => {
+    try {
+      const socket = socketRef.current;
+      if (!socket) {
+        setMessage("Please login first.");
+        return;
+      }
+
+      const result = await (socket as any).createMatch();
+      const createdId = result.match_id || result.matchId || result.id || "";
+      setMatchId(createdId);
+      resetBoard();
+      setStarted(true);
+      setMessage("Game created successfully. Share Match ID to join.");
+    } catch (err: unknown) {
+      console.error("Create match error:", err);
+      const e = err as { message?: string };
+      setStatus("error");
+      setMessage(e?.message || "Failed to create match.");
+    }
+  };
+
+  const handleJoinMatch = async (): Promise<void> => {
+    try {
+      const socket = socketRef.current;
+      if (!socket) {
+        setMessage("Please login first.");
+        return;
+      }
+
+      const id = joinMatchId.trim();
+      if (!id) {
+        setMessage("Enter a Match ID.");
+        return;
+      }
+
+      const result = await (socket as any).joinMatch(id);
+      const joinedId = result.match_id || result.matchId || result.id || id;
+      setMatchId(joinedId);
+      resetBoard();
+      setStarted(true);
+      setMessage("Joined match successfully.");
+    } catch (err: unknown) {
+      console.error("Join match error:", err);
+      const e = err as { message?: string };
+      setStatus("error");
+      setMessage(e?.message || "Failed to join match.");
+    }
+  };
+
+  const handleFindPlayer = async (): Promise<void> => {
+    try {
+      const socket = socketRef.current;
+      if (!socket) {
+        setMessage("Please login first.");
+        return;
+      }
+
+      await (socket as any).addMatchmaker("*", 2, 2);
+      setStatus("loading");
+      setMessage("Finding a player...");
+    } catch (err: unknown) {
+      console.error("Matchmaker error:", err);
+      const e = err as { message?: string };
+      setStatus("error");
+      setMessage(e?.message || "Failed to start matchmaking.");
+    }
+  };
+
+  const handleResetDevice = (): void => {
     localStorage.removeItem("nakama-device-id");
     disconnectSocket();
     setSession(null);
@@ -173,95 +270,17 @@ function App() {
     setFinalUsername("");
     setMatchId("");
     setJoinMatchId("");
-    setBoard(["", "", "", "", "", "", "", "", ""]);
-    setWinner("");
     setStarted(false);
+    resetBoard();
     setStatus("idle");
-    setMessage("Device ID cleared. Login again.");
+    setMessage("Device reset complete.");
   };
 
-  const handleCreateMatch = async () => {
-    try {
-      const socket: any = socketRef.current;
-      if (!socket) {
-        setMessage("Please login first.");
-        return;
-      }
-
-      const result = await socket.createMatch();
-      const createdMatchId = result.match_id || result.matchId || "";
-      setMatchId(createdMatchId);
-      setStarted(true);
-      setWinner("");
-      setBoard(["", "", "", "", "", "", "", "", ""]);
-      setMessage("Game created successfully. Share Match ID to join.");
-    } catch (error: any) {
-      setStatus("error");
-      setMessage(error?.message || "Failed to create match.");
-    }
-  };
-
-  const handleJoinMatch = async () => {
-    try {
-      const socket: any = socketRef.current;
-      if (!socket) {
-        setMessage("Please login first.");
-        return;
-      }
-
-      const result = await socket.joinMatch(joinMatchId);
-      const joinedMatchId = result.match_id || result.matchId || joinMatchId;
-      setMatchId(joinedMatchId);
-      setStarted(true);
-      setWinner("");
-      setMessage("Joined match successfully.");
-    } catch (error: any) {
-      setStatus("error");
-      setMessage(error?.message || "Failed to join match.");
-    }
-  };
-
-  const handleFindPlayer = async () => {
-    try {
-      const socket: any = socketRef.current;
-      if (!socket) {
-        setMessage("Please login first.");
-        return;
-      }
-
-      await socket.addMatchmaker("*", 2, 2);
-      setMessage("Finding a player...");
-    } catch (error: any) {
-      setStatus("error");
-      setMessage(error?.message || "Failed to start matchmaking.");
-    }
-  };
-
-  const handleCellClick = async (index: number) => {
-    try {
-      if (!matchId) {
-        setMessage("Create or join a match first.");
-        return;
-      }
-
-      if (winner) return;
-
-      const socket: any = socketRef.current;
-      if (!socket) {
-        setMessage("Socket not connected.");
-        return;
-      }
-
-      await socket.sendMatchState(
-        matchId,
-        MOVE_OPCODE,
-        JSON.stringify({ position: index })
-      );
-    } catch (error: any) {
-      setStatus("error");
-      setMessage(error?.message || "Failed to send move.");
-    }
-  };
+  useEffect(() => {
+    return () => {
+      disconnectSocket();
+    };
+  }, []);
 
   const statusColor =
     status === "success"
@@ -280,12 +299,6 @@ function App() {
       : status === "loading"
       ? "#ffedd5"
       : "#f8fafc";
-
-  useEffect(() => {
-    return () => {
-      disconnectSocket();
-    };
-  }, []);
 
   return (
     <div
@@ -306,8 +319,9 @@ function App() {
           width: "100%",
           maxWidth: "1180px",
           display: "grid",
-          gridTemplateColumns: "1.1fr 0.9fr",
+          gridTemplateColumns: "repeat(auto-fit, minmax(340px, 1fr))",
           gap: "24px",
+          alignItems: "start",
         }}
       >
         <div
@@ -355,8 +369,7 @@ function App() {
                 lineHeight: 1.7,
               }}
             >
-              Login, create a game, join by match ID, or find a player using
-              Nakama matchmaking.
+              Login, create a game, join by match ID, or find a player using Nakama matchmaking.
             </p>
           </div>
 
@@ -434,22 +447,6 @@ function App() {
               }}
             >
               Reset Device
-            </button>
-
-            <button
-              onClick={() => setShowDetails((prev) => !prev)}
-              style={{
-                padding: "14px 20px",
-                borderRadius: "14px",
-                border: "1px solid #e2e8f0",
-                background: "#f8fafc",
-                color: "#334155",
-                fontWeight: 700,
-                fontSize: "15px",
-                cursor: "pointer",
-              }}
-            >
-              {showDetails ? "Hide Details" : "Show Details"}
             </button>
           </div>
 
@@ -545,6 +542,7 @@ function App() {
                   color: "#0f172a",
                   fontWeight: 700,
                   fontSize: "14px",
+                  wordBreak: "break-word",
                 }}
               >
                 {finalUsername || "-"}
@@ -565,9 +563,10 @@ function App() {
               <p
                 style={{
                   margin: "8px 0 0 0",
-                  color: socketConnected ? "#15803d" : "#0f172a",
+                  color: "#0f172a",
                   fontWeight: 700,
                   fontSize: "14px",
+                  wordBreak: "break-word",
                 }}
               >
                 {socketConnected ? "Connected" : "Disconnected"}
@@ -575,125 +574,119 @@ function App() {
             </div>
           </div>
 
+          <hr
+            style={{
+              border: "none",
+              borderTop: "1px solid #e2e8f0",
+              margin: "22px 0",
+            }}
+          />
+
+          <h2 style={{ margin: "0 0 16px 0", fontSize: "24px", color: "#0f172a" }}>
+            Game Controls
+          </h2>
+
           <div
             style={{
-              borderTop: "1px solid #e2e8f0",
-              paddingTop: "24px",
+              display: "flex",
+              gap: "12px",
+              flexWrap: "wrap",
+              marginBottom: "14px",
             }}
           >
-            <h2
+            <button
+              onClick={handleCreateMatch}
               style={{
-                marginTop: 0,
-                marginBottom: "16px",
-                color: "#0f172a",
-                fontSize: "22px",
-              }}
-            >
-              Game Controls
-            </h2>
-
-            <div
-              style={{
-                display: "flex",
-                gap: "12px",
-                flexWrap: "wrap",
-                marginBottom: "18px",
-              }}
-            >
-              <button
-                onClick={handleCreateMatch}
-                style={{
-                  padding: "14px 20px",
-                  borderRadius: "14px",
-                  border: "none",
-                  background: "#0f766e",
-                  color: "#fff",
-                  fontWeight: 700,
-                  cursor: "pointer",
-                }}
-              >
-                Create Game
-              </button>
-
-              <button
-                onClick={handleFindPlayer}
-                style={{
-                  padding: "14px 20px",
-                  borderRadius: "14px",
-                  border: "none",
-                  background: "#7c3aed",
-                  color: "#fff",
-                  fontWeight: 700,
-                  cursor: "pointer",
-                }}
-              >
-                Find Player
-              </button>
-            </div>
-
-            <div
-              style={{
-                display: "flex",
-                gap: "12px",
-                flexWrap: "wrap",
-                marginBottom: "18px",
-              }}
-            >
-              <input
-                type="text"
-                value={joinMatchId}
-                onChange={(e) => setJoinMatchId(e.target.value)}
-                placeholder="Enter Match ID"
-                style={{
-                  flex: 1,
-                  minWidth: "240px",
-                  padding: "14px 16px",
-                  borderRadius: "14px",
-                  border: "1px solid #cbd5e1",
-                  background: "#fff",
-                  color: "#0f172a",
-                  fontSize: "15px",
-                }}
-              />
-
-              <button
-                onClick={handleJoinMatch}
-                style={{
-                  padding: "14px 20px",
-                  borderRadius: "14px",
-                  border: "none",
-                  background: "#ea580c",
-                  color: "#fff",
-                  fontWeight: 700,
-                  cursor: "pointer",
-                }}
-              >
-                Join Game
-              </button>
-            </div>
-
-            <div
-              style={{
-                background: "#f8fafc",
+                padding: "14px 20px",
                 borderRadius: "16px",
-                border: "1px solid #e2e8f0",
-                padding: "16px",
+                border: "none",
+                background: "#0f766e",
+                color: "#fff",
+                fontWeight: 700,
+                fontSize: "15px",
+                cursor: "pointer",
+                minWidth: "140px",
               }}
             >
-              <p style={{ margin: "0 0 8px 0", color: "#64748b", fontSize: "13px" }}>
-                Current Match ID
-              </p>
-              <p
-                style={{
-                  margin: 0,
-                  color: "#0f172a",
-                  fontWeight: 700,
-                  wordBreak: "break-word",
-                }}
-              >
-                {matchId || "-"}
-              </p>
-            </div>
+              Create Game
+            </button>
+
+            <button
+              onClick={handleFindPlayer}
+              style={{
+                padding: "14px 20px",
+                borderRadius: "16px",
+                border: "none",
+                background: "#7c3aed",
+                color: "#fff",
+                fontWeight: 700,
+                fontSize: "15px",
+                cursor: "pointer",
+                minWidth: "140px",
+              }}
+            >
+              Find Player
+            </button>
+          </div>
+
+          <input
+            type="text"
+            value={joinMatchId}
+            onChange={(e) => setJoinMatchId(e.target.value)}
+            placeholder="Enter Match ID"
+            style={{
+              width: "100%",
+              padding: "14px 16px",
+              borderRadius: "14px",
+              border: "1px solid #cbd5e1",
+              background: "#fff",
+              color: "#0f172a",
+              outline: "none",
+              fontSize: "15px",
+              marginBottom: "14px",
+            }}
+          />
+
+          <button
+            onClick={handleJoinMatch}
+            style={{
+              padding: "14px 20px",
+              borderRadius: "16px",
+              border: "none",
+              background: "#ea580c",
+              color: "#fff",
+              fontWeight: 700,
+              fontSize: "15px",
+              cursor: "pointer",
+              minWidth: "140px",
+              marginBottom: "18px",
+            }}
+          >
+            Join Game
+          </button>
+
+          <div
+            style={{
+              background: "#f8fafc",
+              borderRadius: "18px",
+              padding: "18px",
+              border: "1px solid #e2e8f0",
+            }}
+          >
+            <p style={{ margin: 0, color: "#64748b", fontSize: "13px" }}>
+              Current Match ID
+            </p>
+            <p
+              style={{
+                margin: "8px 0 0 0",
+                color: "#0f172a",
+                fontWeight: 700,
+                fontSize: "14px",
+                wordBreak: "break-word",
+              }}
+            >
+              {matchId || "-"}
+            </p>
           </div>
         </div>
 
@@ -701,19 +694,13 @@ function App() {
           style={{
             background: "#0f172a",
             borderRadius: "24px",
-            padding: "28px",
+            padding: "32px",
             color: "#e2e8f0",
-            boxShadow: "0 18px 50px rgba(15, 23, 42, 0.12)",
+            border: "1px solid #1e293b",
+            boxShadow: "0 18px 50px rgba(15, 23, 42, 0.2)",
           }}
         >
-          <h2
-            style={{
-              marginTop: 0,
-              marginBottom: "18px",
-              fontSize: "22px",
-              color: "#ffffff",
-            }}
-          >
+          <h2 style={{ margin: "0 0 20px 0", fontSize: "28px", color: "#fff" }}>
             Game Board
           </h2>
 
@@ -721,38 +708,38 @@ function App() {
             style={{
               display: "grid",
               gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
-              gap: "12px",
-              marginBottom: "18px",
+              gap: "14px",
+              marginBottom: "16px",
             }}
           >
             <div
               style={{
-                padding: "14px",
-                borderRadius: "16px",
-                background: "rgba(255,255,255,0.06)",
-                border: "1px solid rgba(255,255,255,0.08)",
+                background: "#1e293b",
+                borderRadius: "18px",
+                padding: "16px",
+                border: "1px solid #334155",
               }}
             >
               <p style={{ margin: 0, color: "#94a3b8", fontSize: "13px" }}>
                 Started
               </p>
-              <p style={{ margin: "8px 0 0 0", fontWeight: 700 }}>
+              <p style={{ margin: "8px 0 0 0", color: "#fff", fontWeight: 700 }}>
                 {started ? "Yes" : "No"}
               </p>
             </div>
 
             <div
               style={{
-                padding: "14px",
-                borderRadius: "16px",
-                background: "rgba(255,255,255,0.06)",
-                border: "1px solid rgba(255,255,255,0.08)",
+                background: "#1e293b",
+                borderRadius: "18px",
+                padding: "16px",
+                border: "1px solid #334155",
               }}
             >
               <p style={{ margin: 0, color: "#94a3b8", fontSize: "13px" }}>
                 Current Turn
               </p>
-              <p style={{ margin: "8px 0 0 0", fontWeight: 700 }}>
+              <p style={{ margin: "8px 0 0 0", color: "#fff", fontWeight: 700 }}>
                 {currentTurn}
               </p>
             </div>
@@ -760,45 +747,40 @@ function App() {
 
           <div
             style={{
+              background: "#1e293b",
+              borderRadius: "18px",
+              padding: "16px",
+              border: "1px solid #334155",
               marginBottom: "18px",
-              padding: "14px 16px",
-              borderRadius: "16px",
-              background: winner
-                ? "rgba(34,197,94,0.15)"
-                : "rgba(255,255,255,0.06)",
-              border: winner
-                ? "1px solid rgba(34,197,94,0.35)"
-                : "1px solid rgba(255,255,255,0.08)",
             }}
           >
-            <strong>
+            <p style={{ margin: 0, color: "#fff", fontWeight: 700 }}>
               {winner
-                ? winner === "Draw"
-                  ? "Game Result: Draw"
-                  : `Winner: ${winner}`
-                : "Game in progress"}
-            </strong>
+                ? `Winner: ${winner}`
+                : started
+                ? "Game in progress"
+                : "Waiting to start"}
+            </p>
           </div>
 
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: "repeat(3, 1fr)",
+              gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
               gap: "12px",
-              marginBottom: "20px",
             }}
           >
             {board.map((cell, index) => (
               <button
                 key={index}
-                onClick={() => handleCellClick(index)}
+                onClick={() => setMessage(`Cell ${index + 1} clicked.`)}
                 style={{
-                  height: "100px",
-                  borderRadius: "20px",
-                  border: "1px solid rgba(255,255,255,0.1)",
-                  background: "rgba(255,255,255,0.06)",
-                  color: "#ffffff",
-                  fontSize: "34px",
+                  aspectRatio: "1 / 1",
+                  borderRadius: "18px",
+                  border: "1px solid #334155",
+                  background: "#1e293b",
+                  color: "#fff",
+                  fontSize: "32px",
                   fontWeight: 800,
                   cursor: "pointer",
                 }}
@@ -807,42 +789,6 @@ function App() {
               </button>
             ))}
           </div>
-
-          {showDetails && (
-            <div
-              style={{
-                padding: "18px",
-                borderRadius: "18px",
-                background: "rgba(255,255,255,0.05)",
-                border: "1px solid rgba(255,255,255,0.08)",
-              }}
-            >
-              <p
-                style={{
-                  marginTop: 0,
-                  marginBottom: "10px",
-                  fontWeight: 800,
-                  color: "#ffffff",
-                }}
-              >
-                Session Snapshot
-              </p>
-
-              <div style={{ fontSize: "14px", lineHeight: 1.8, color: "#cbd5e1" }}>
-                <div>
-                  <strong>Logged In:</strong> {session ? "Yes" : "No"}
-                </div>
-                <div>
-                  <strong>Session Username:</strong>{" "}
-                  {(session as any)?.username || "-"}
-                </div>
-                <div>
-                  <strong>Session User ID:</strong>{" "}
-                  {(session as any)?.user_id || "-"}
-                </div>
-              </div>
-            </div>
-          )}
         </div>
       </div>
     </div>
