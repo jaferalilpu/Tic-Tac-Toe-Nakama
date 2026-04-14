@@ -1,10 +1,16 @@
-import React, { useEffect, useRef, useState } from "react";
-import { Client, Session, Socket, MatchData } from "@heroiclabs/nakama-js";
-import confetti from "canvas-confetti";
-import "./App.css";
+import React, { useEffect, useState, useCallback, useRef } from 'react';
+import {
+  Client,
+  Session,
+  Socket,
+  MatchData,
+  MatchPresenceEvent,
+} from '@heroiclabs/nakama-js';
+import confetti from 'canvas-confetti';
+import './App.css';
 
-type Mark = "" | "X" | "O";
-type Winner = "" | "X" | "O" | "Draw";
+type Mark = '' | 'X' | 'O';
+type Winner = '' | 'X' | 'O' | 'Draw';
 
 interface GameState {
   board: Mark[];
@@ -13,7 +19,10 @@ interface GameState {
   currentTurn: Mark;
   winner: Winner;
   started: boolean;
-  usernames?: Record<string, string>;
+}
+
+interface MatchInfo {
+  match_id: string;
 }
 
 const App: React.FC = () => {
@@ -21,235 +30,367 @@ const App: React.FC = () => {
   const [session, setSession] = useState<Session | null>(null);
   const socketRef = useRef<Socket | null>(null);
 
-  const [username, setUsername] = useState("");
-  const [myUserId, setMyUserId] = useState("");
-  const [matchId, setMatchId] = useState("");
+  const [username, setUsername] = useState('');
+  const [myUserId, setMyUserId] = useState('');
+  const [match, setMatch] = useState<MatchInfo | null>(null);
   const [gameState, setGameState] = useState<GameState | null>(null);
-  const [mySymbol, setMySymbol] = useState<Mark>("");
-  const [status, setStatus] = useState("Disconnected");
-  const [error, setError] = useState("");
 
-  const host = "tic-tac-toe-nakama-1-osku.onrender.com";
-  const port = "443";
-  const useSSL = true;
+  const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState('');
+
+  const [mySymbol, setMySymbol] = useState<Mark>('');
+  const [opponentConnected, setOpponentConnected] = useState(false);
+
+  const host =
+    process.env.REACT_APP_NAKAMA_HOST || 'tic-tac-toe-nakama-1-osku.onrender.com';
+  const port = process.env.REACT_APP_NAKAMA_PORT || '443';
+  const useSSL =
+    process.env.REACT_APP_NAKAMA_SSL
+      ? process.env.REACT_APP_NAKAMA_SSL === 'true'
+      : true;
 
   useEffect(() => {
-    const c = new Client("defaultkey", host, port, useSSL);
-    setClient(c);
-    setStatus(`Server: ${useSSL ? "wss" : "ws"}://${host}:${port}`);
-  }, []);
+    const nakamaClient = new Client('defaultkey', host, port, useSSL);
+    setClient(nakamaClient);
+    setStatus(`Server ready: ${useSSL ? 'wss' : 'ws'}://${host}:${port}`);
+  }, [host, port, useSSL]);
 
-  const getDeviceId = () => {
-    const key = "nakama-device-id";
+  const getDeviceId = useCallback(() => {
+    const key = 'nakama-device-id';
     let id = localStorage.getItem(key);
+
     if (!id) {
-      id = crypto.randomUUID();
+      id =
+        typeof crypto !== 'undefined' && 'randomUUID' in crypto
+          ? crypto.randomUUID()
+          : `device-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       localStorage.setItem(key, id);
     }
+
     return id;
-  };
+  }, []);
 
   const connectToNakama = async () => {
-    if (!client) return;
-    if (!username.trim()) {
-      setError("Enter a username");
+    if (!client || !username.trim()) {
+      setError('Please enter a username');
       return;
     }
 
     try {
-      setError("");
-      setStatus("Connecting...");
+      setError(null);
+      setStatus('Authenticating...');
 
       const deviceId = getDeviceId();
-      const cleanUsername = username.trim().replace(/\s+/g, "_");
+      const cleanUsername = username.trim().replace(/\s+/g, '_');
 
       const newSession = await client.authenticateDevice(deviceId, true);
 
       try {
         await client.updateAccount(newSession, { username: cleanUsername });
-      } catch {
-        // ignore username update failure
+      } catch (e) {
+        console.warn('Username update failed:', e);
       }
 
       setSession(newSession);
-      setMyUserId((newSession as any).userId || (newSession as any).user_id || "");
 
-      const socket = client.createSocket(useSSL, false);
-      await socket.connect(newSession, true);
-      socketRef.current = socket;
+      const resolvedUserId =
+        (newSession as any).userId ||
+        (newSession as any).user_id ||
+        (newSession as any).id ||
+        '';
 
-      socket.onmatchdata = (matchData: MatchData) => {
-        if (matchData.op_code !== 3) return;
+      setMyUserId(resolvedUserId);
+      setStatus('Connected successfully');
 
+      if (socketRef.current) {
+        socketRef.current.disconnect(false);
+      }
+
+      const newSocket = client.createSocket(useSSL, false);
+      await newSocket.connect(newSession, true);
+      socketRef.current = newSocket;
+    } catch (err: any) {
+      console.error('Auth error:', err);
+      const message = err?.message || 'Connection failed';
+      setError(`Connection failed: ${message}`);
+      setStatus('');
+    }
+  };
+
+  useEffect(() => {
+    const socket = socketRef.current;
+    if (!socket) return;
+
+    const handleMatchData = (matchData: MatchData) => {
+      try {
         const decoded = new TextDecoder().decode(matchData.data);
         const data = JSON.parse(decoded);
 
+        if (matchData.op_code === 4) {
+          setError(data?.error || 'Match error');
+          return;
+        }
+
+        if (matchData.op_code !== 3) return;
+
         const nextState: GameState = {
-          board: Array.isArray(data.board) ? data.board : ["", "", "", "", "", "", "", "", ""],
+          board: Array.isArray(data.board) ? data.board : ['', '', '', '', '', '', '', '', ''],
           playerX: data.playerX ?? null,
           playerO: data.playerO ?? null,
-          currentTurn: data.currentTurn ?? "X",
-          winner: data.winner ?? "",
-          started: !!data.started,
-          usernames: data.usernames || {},
+          currentTurn: data.currentTurn ?? 'X',
+          winner: data.winner ?? '',
+          started: Boolean(data.started),
         };
 
         setGameState(nextState);
 
         const mine: Mark =
-          nextState.playerX === (newSession as any).userId
-            ? "X"
-            : nextState.playerO === (newSession as any).userId
-            ? "O"
-            : "";
+          nextState.playerX === myUserId
+            ? 'X'
+            : nextState.playerO === myUserId
+            ? 'O'
+            : '';
 
         setMySymbol(mine);
 
-        if (!nextState.started) {
-          setStatus("Waiting for second player to join...");
+        const hasOpponent =
+          !!myUserId &&
+          ((mine === 'X' && !!nextState.playerO) || (mine === 'O' && !!nextState.playerX));
+
+        setOpponentConnected(hasOpponent);
+
+        if (!nextState.started || !nextState.playerX || !nextState.playerO) {
+          setStatus('Waiting for second player to join...');
           return;
         }
 
-        if (nextState.winner === "Draw") {
-          setStatus("Match draw!");
+        if (nextState.winner === 'Draw') {
+          setStatus('🤝 Match draw!');
           return;
         }
 
-        if (nextState.winner && nextState.winner === mine) {
-          setStatus("You won!");
-          confetti({ particleCount: 120, spread: 70, origin: { y: 0.6 } });
+        if (nextState.winner === mine && mine) {
+          setStatus('🎉 You won!');
+          confetti({
+            particleCount: 120,
+            spread: 70,
+            origin: { y: 0.6 },
+          });
           return;
         }
 
         if (nextState.winner && nextState.winner !== mine) {
-          setStatus("You lost!");
+          setStatus('😢 You lost!');
           return;
         }
 
-        setStatus(nextState.currentTurn === mine ? "Your turn" : "Opponent's turn");
-      };
+        if (nextState.currentTurn === mine) {
+          setStatus('Your turn');
+        } else {
+          setStatus("Opponent's turn");
+        }
+      } catch (err) {
+        console.error('Match data parse error:', err);
+      }
+    };
 
-      setStatus("Connected. Click Find Match.");
-    } catch (e: any) {
-      setError(e?.message || "Connection failed");
-      setStatus("Disconnected");
-    }
-  };
+    const handleMatchPresence = (_presenceEvent: MatchPresenceEvent) => {
+      setStatus('Player joined/left. Syncing match state...');
+    };
+
+    socket.onmatchdata = handleMatchData;
+    socket.onmatchpresence = handleMatchPresence;
+
+    return () => {
+      socket.onmatchdata = (_matchData: MatchData) => {};
+      socket.onmatchpresence = (_presenceEvent: MatchPresenceEvent) => {};
+    };
+  }, [myUserId, mySymbol]);
 
   const findMatch = async () => {
     if (!client || !session || !socketRef.current) {
-      setError("Connect first");
+      setError('Not connected properly');
       return;
     }
 
     try {
-      setError("");
+      setError(null);
       setGameState(null);
-      setMatchId("");
-      setMySymbol("");
-      setStatus("Searching for opponent...");
+      setMatch(null);
+      setMySymbol('');
+      setOpponentConnected(false);
+      setStatus('Searching for opponent...');
 
-      const rpc: any = await client.rpc(session, "find_match", {});
-      const parsed = typeof rpc.payload === "string" ? JSON.parse(rpc.payload) : rpc.payload;
-      const id = parsed.matchId || parsed.match_id;
+      const rpc: any = await client.rpc(session, 'find_match', {});
+      console.log('Raw RPC response:', rpc);
 
-      if (!id) throw new Error("No matchId returned");
+      let parsed: any = {};
 
-      const joined = await socketRef.current.joinMatch(id);
-      setMatchId(joined.match_id);
-      setStatus("Joined match. Waiting for opponent...");
-    } catch (e: any) {
-      setError(e?.message || "Matchmaking failed");
-      setStatus("Disconnected");
+      if (typeof rpc?.payload === 'string') {
+        parsed = JSON.parse(rpc.payload || '{}');
+      } else if (rpc?.payload && typeof rpc.payload === 'object') {
+        parsed = rpc.payload;
+      } else {
+        parsed = rpc || {};
+      }
+
+      console.log('Parsed RPC payload:', parsed);
+
+      const matchId = parsed.matchId || parsed.match_id;
+
+      if (!matchId) {
+        throw new Error('No valid match ID returned from RPC');
+      }
+
+      const joined = await socketRef.current.joinMatch(String(matchId));
+      setMatch({ match_id: joined.match_id });
+      setStatus('Joined match. Waiting for opponent...');
+    } catch (err: any) {
+      console.error('Matchmaking error:', err);
+      setError(`Matchmaking failed: ${err?.message || 'Unknown error'}`);
     }
   };
 
   const makeMove = async (pos: number) => {
-    if (!socketRef.current || !matchId || !gameState) return;
-    if (!mySymbol || gameState.currentTurn !== mySymbol) return;
-    if (gameState.winner || !gameState.started || gameState.board[pos]) return;
+    if (!socketRef.current || !match || !gameState) return;
+    if (!gameState.started) return;
+    if (gameState.winner) return;
+    if (!mySymbol) return;
+    if (gameState.currentTurn !== mySymbol) return;
+    if (gameState.board[pos]) return;
 
-    await socketRef.current.sendMatchState(matchId, 2, JSON.stringify({ position: pos }));
+    try {
+      await socketRef.current.sendMatchState(
+        match.match_id,
+        2,
+        JSON.stringify({ position: pos })
+      );
+    } catch (err: any) {
+      console.error('Move failed:', err);
+      setError(`Move failed: ${err?.message || 'Unknown error'}`);
+    }
   };
 
-  const playAgain = async () => {
-    if (!socketRef.current || !matchId) return;
-    await socketRef.current.sendMatchState(matchId, 3, "{}");
+  const restartGame = () => {
+    setStatus('Play Again is not implemented in server yet');
   };
 
   const leaveMatch = () => {
-    setMatchId("");
+    setMatch(null);
     setGameState(null);
-    setMySymbol("");
-    setStatus("Connected. Click Find Match.");
+    setMySymbol('');
+    setOpponentConnected(false);
+    setError(null);
+    setStatus('Ready to find a new match');
   };
 
   useEffect(() => {
     return () => {
-      socketRef.current?.disconnect(false);
+      if (socketRef.current) {
+        socketRef.current.disconnect(false);
+      }
     };
   }, []);
 
+  const opponentName = opponentConnected ? 'Connected' : 'Waiting...';
+
   return (
     <div className="app">
-      <h1>Tic-Tac-Toe</h1>
-      <p>{status}</p>
-      {error && <p style={{ color: "red" }}>{error}</p>}
-
-      {!session ? (
-        <div>
-          <input
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            placeholder="Enter username"
-          />
-          <button onClick={connectToNakama}>Connect</button>
+      <div className="header">
+        <h1>🎮 Tic-Tac-Toe</h1>
+        <div className="connection-info">
+          <span className="server-badge">
+            Server: {useSSL ? 'wss' : 'ws'}://{host}:{port}
+          </span>
         </div>
-      ) : !matchId ? (
-        <button onClick={findMatch}>Find Match</button>
-      ) : (
-        <div>
-          <p>You: {mySymbol || "-"}</p>
-          <p>
-            Opponent:{" "}
-            {gameState?.playerX && gameState?.playerO ? "Connected" : "Waiting..."}
-          </p>
+      </div>
 
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(3, 80px)",
-              gap: "8px",
-              marginTop: "20px",
-            }}
-          >
-            {(gameState?.board || ["", "", "", "", "", "", "", "", ""]).map((cell, i) => (
-              <button
-                key={i}
-                onClick={() => makeMove(i)}
-                disabled={
-                  !gameState?.started ||
-                  !!cell ||
-                  !!gameState?.winner ||
-                  gameState.currentTurn !== mySymbol
-                }
-                style={{
-                  width: 80,
-                  height: 80,
-                  fontSize: 28,
-                }}
-              >
-                {cell}
+      {error && <div className="error-banner">{error}</div>}
+
+      <div className="main-content">
+        {status && <div className="status">{status}</div>}
+
+        {!session ? (
+          <div className="login-screen">
+            <h2>Join the Game</h2>
+            <p className="subtitle">Enter your name to connect</p>
+            <input
+              className="username-input"
+              placeholder="Enter name"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+            />
+            <button className="connect-btn" onClick={connectToNakama}>
+              Connect
+            </button>
+          </div>
+        ) : !match ? (
+          <div className="matchmaking-screen">
+            <h2>Welcome, {username}</h2>
+            <p className="subtitle">You are connected. Find a player to start.</p>
+            <button className="find-match-btn" onClick={findMatch}>
+              Find Match
+            </button>
+          </div>
+        ) : (
+          <div className="game-screen">
+            <h2>Match in Progress</h2>
+
+            <div className="players">
+              <div className="player me">
+                <span className="symbol">You ({mySymbol || '-'})</span>
+                <span className="name">{username}</span>
+              </div>
+
+              <div className="player opponent">
+                <span className="symbol">Opponent</span>
+                <span className="name">{opponentName}</span>
+              </div>
+            </div>
+
+            {!gameState || !gameState.started ? (
+              <div className="waiting-box">Waiting for second player to join...</div>
+            ) : (
+              <div className="game-board">
+                {gameState.board.map((cell, i) => {
+                  const clickable =
+                    !cell &&
+                    !gameState.winner &&
+                    mySymbol !== '' &&
+                    gameState.currentTurn === mySymbol;
+
+                  return (
+                    <button
+                      key={i}
+                      className={`cell ${cell ? 'filled' : ''} ${clickable ? 'active' : ''}`}
+                      onClick={() => makeMove(i)}
+                      disabled={!clickable}
+                    >
+                      {cell}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            <div className="game-controls">
+              {gameState?.winner && (
+                <button className="restart-btn" onClick={restartGame}>
+                  Play Again
+                </button>
+              )}
+
+              <button className="leave-match-btn" onClick={leaveMatch}>
+                Leave Match
               </button>
-            ))}
+            </div>
           </div>
+        )}
+      </div>
 
-          <div style={{ marginTop: 16 }}>
-            {gameState?.winner && <button onClick={playAgain}>Play Again</button>}
-            <button onClick={leaveMatch}>Leave Match</button>
-          </div>
-        </div>
-      )}
+      <div className="footer">
+        <p>Multiplayer Tic-Tac-Toe with Nakama</p>
+      </div>
     </div>
   );
 };
