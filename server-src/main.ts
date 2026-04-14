@@ -5,9 +5,11 @@ interface TicTacToeState {
   board: (string | null)[];
   currentPlayer: string;
   players: { [userId: string]: string };
+  usernames: { [userId: string]: string };
   winner: string | null;
   gameOver: boolean;
   moveCount: number;
+  started: boolean;
 }
 
 interface MatchLabel {
@@ -54,6 +56,7 @@ function resetGame(state: TicTacToeState): TicTacToeState {
       ? playerIds[Math.floor(Math.random() * playerIds.length)]
       : '';
 
+  state.started = playerIds.length === 2;
   return state;
 }
 
@@ -100,9 +103,11 @@ const matchInit: nkruntime.MatchInitFunction<TicTacToeState> = function (
     board: makeEmptyBoard(),
     currentPlayer: '',
     players: {},
+    usernames: {},
     winner: null,
     gameOver: false,
     moveCount: 0,
+    started: false,
   };
 
   const label: MatchLabel = { open: 1 };
@@ -142,20 +147,29 @@ const matchJoin: nkruntime.MatchJoinFunction<TicTacToeState> = function (
   presences
 ) {
   for (const presence of presences) {
+    if (state.players[presence.userId]) {
+      continue;
+    }
+
     const playerCount = Object.keys(state.players).length;
 
     if (playerCount === 0) {
       state.players[presence.userId] = 'X';
+      state.usernames[presence.userId] = presence.username;
       state.currentPlayer = presence.userId;
       logger.info(`Player ${presence.username} joined as X`);
     } else if (playerCount === 1) {
       state.players[presence.userId] = 'O';
+      state.usernames[presence.userId] = presence.username;
       logger.info(`Player ${presence.username} joined as O`);
     }
   }
 
+  const totalPlayers = Object.keys(state.players).length;
+  state.started = totalPlayers === 2;
+
   dispatcher.matchLabelUpdate(
-    JSON.stringify({ open: Object.keys(state.players).length >= 2 ? 0 : 1 })
+    JSON.stringify({ open: totalPlayers >= 2 ? 0 : 1 })
   );
 
   broadcastState(dispatcher, state);
@@ -174,12 +188,17 @@ const matchLeave: nkruntime.MatchLeaveFunction<TicTacToeState> = function (
   for (const presence of presences) {
     logger.info(`Player ${presence.username} left`);
     delete state.players[presence.userId];
+    delete state.usernames[presence.userId];
   }
 
-  if (Object.keys(state.players).length < 2) {
+  const totalPlayers = Object.keys(state.players).length;
+  state.started = false;
+
+  if (totalPlayers < 2) {
     dispatcher.matchLabelUpdate(JSON.stringify({ open: 1 }));
   }
 
+  broadcastState(dispatcher, state);
   return { state };
 };
 
@@ -225,6 +244,11 @@ function processMove(
   dispatcher: nkruntime.MatchDispatcher,
   logger: nkruntime.Logger
 ): TicTacToeState {
+  if (!state.started || Object.keys(state.players).length < 2) {
+    broadcastError(dispatcher, 'Waiting for second player');
+    return state;
+  }
+
   if (state.gameOver) {
     broadcastError(dispatcher, 'Game is over');
     return state;
@@ -301,12 +325,12 @@ const rpcFindMatch: nkruntime.RpcFunction = function (
   nk,
   payload
 ): string {
-  const limit = 10;
+  const limit = 20;
   const isAuthoritative = true;
   const label = '';
-  const minSize = 1;
-  const maxSize = 2;
-  const query = '+label.open:>=1';
+  const minSize = 0;
+  const maxSize = 1;
+  const query = '+label.open:1';
 
   const matches = nk.matchList(
     limit,
@@ -317,18 +341,16 @@ const rpcFindMatch: nkruntime.RpcFunction = function (
     query
   );
 
-  logger.info('find_match found %d matches', matches.length);
+  logger.info('find_match found %d open matches', matches.length);
 
-  let matchIds: string[] = [];
+  let selectedMatchId = '';
 
   if (matches.length > 0) {
-    matchIds = matches
-      .map((m: any) => m.matchId || m.match_id)
-      .filter((id: string | undefined) => !!id)
-      .map((id: string) => String(id));
+    const first = matches[0] as any;
+    selectedMatchId = String(first.matchId || first.match_id || '');
   }
 
-  if (matchIds.length === 0) {
+  if (!selectedMatchId) {
     const createdMatchId = nk.matchCreate(moduleName, {});
     logger.info('find_match created matchId=%s', createdMatchId);
 
@@ -336,11 +358,16 @@ const rpcFindMatch: nkruntime.RpcFunction = function (
       throw new Error('find_match could not create a match');
     }
 
-    matchIds.push(String(createdMatchId));
+    selectedMatchId = String(createdMatchId);
   }
 
-  logger.info('find_match returning matchIds=%v', matchIds);
-  return JSON.stringify({ matchIds });
+  logger.info(
+    'find_match returning matchId=%s userId=%s',
+    selectedMatchId,
+    ctx.userId
+  );
+
+  return JSON.stringify({ matchId: selectedMatchId });
 };
 
 function InitModule(
