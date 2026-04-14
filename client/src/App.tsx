@@ -1,12 +1,7 @@
-import React, { useMemo, useRef, useState } from "react";
-import "./App.css";
-import {
-  Client,
-  Session,
-  Socket,
-  type MatchData,
-} from "@heroiclabs/nakama-js";
+import React, { useEffect, useRef, useState } from "react";
+import { Client, Session, Socket, MatchData } from "@heroiclabs/nakama-js";
 import confetti from "canvas-confetti";
+import "./App.css";
 
 type Mark = "" | "X" | "O";
 type Winner = "" | "X" | "O" | "Draw";
@@ -18,415 +13,245 @@ interface GameState {
   currentTurn: Mark;
   winner: Winner;
   started: boolean;
-  usernames: Record<string, string>;
+  usernames?: Record<string, string>;
 }
 
-const SERVER_KEY = import.meta.env.VITE_NAKAMA_SERVER_KEY || "defaultkey";
-const HOST = import.meta.env.VITE_NAKAMA_HOST || "127.0.0.1";
-const PORT = import.meta.env.VITE_NAKAMA_PORT || "7350";
-const SCHEME = (import.meta.env.VITE_NAKAMA_SCHEME || "http").toLowerCase();
-
-const useSSL = SCHEME === "https";
-const client = new Client(SERVER_KEY, HOST, PORT, useSSL);
-
-const EMPTY_BOARD: Mark[] = ["", "", "", "", "", "", "", "", ""];
-
-function App() {
-  const [username, setUsername] = useState("");
+const App: React.FC = () => {
+  const [client, setClient] = useState<Client | null>(null);
   const [session, setSession] = useState<Session | null>(null);
-  const [matchId, setMatchId] = useState("");
-  const [gameState, setGameState] = useState<GameState | null>(null);
-  const [myUserId, setMyUserId] = useState("");
-  const [mySymbol, setMySymbol] = useState<Mark>("");
-  const [status, setStatus] = useState("Enter username and connect");
-  const [error, setError] = useState("");
-  const [connecting, setConnecting] = useState(false);
-  const [finding, setFinding] = useState(false);
-
   const socketRef = useRef<Socket | null>(null);
 
-  const opponentName = useMemo(() => {
-    if (!gameState) return "";
-    if (gameState.playerX && gameState.playerX !== myUserId) {
-      return gameState.usernames?.[gameState.playerX] || "Opponent";
-    }
-    if (gameState.playerO && gameState.playerO !== myUserId) {
-      return gameState.usernames?.[gameState.playerO] || "Opponent";
-    }
-    return "";
-  }, [gameState, myUserId]);
+  const [username, setUsername] = useState("");
+  const [myUserId, setMyUserId] = useState("");
+  const [matchId, setMatchId] = useState("");
+  const [gameState, setGameState] = useState<GameState | null>(null);
+  const [mySymbol, setMySymbol] = useState<Mark>("");
+  const [status, setStatus] = useState("Disconnected");
+  const [error, setError] = useState("");
 
-  const myName = useMemo(() => {
-    if (!gameState || !myUserId) return username || "You";
-    return gameState.usernames?.[myUserId] || username || "You";
-  }, [gameState, myUserId, username]);
+  const host = "tic-tac-toe-nakama-1-osku.onrender.com";
+  const port = "443";
+  const useSSL = true;
 
-  const canPlay = useMemo(() => {
-    if (!gameState) return false;
-    if (!gameState.started) return false;
-    if (gameState.winner) return false;
-    if (!mySymbol) return false;
-    return gameState.currentTurn === mySymbol;
-  }, [gameState, mySymbol]);
+  useEffect(() => {
+    const c = new Client("defaultkey", host, port, useSSL);
+    setClient(c);
+    setStatus(`Server: ${useSSL ? "wss" : "ws"}://${host}:${port}`);
+  }, []);
 
   const getDeviceId = () => {
     const key = "nakama-device-id";
-    let id = sessionStorage.getItem(key);
-
+    let id = localStorage.getItem(key);
     if (!id) {
-      id =
-        typeof crypto !== "undefined" && "randomUUID" in crypto
-          ? crypto.randomUUID()
-          : `device-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-
-      sessionStorage.setItem(key, id);
+      id = crypto.randomUUID();
+      localStorage.setItem(key, id);
     }
-
     return id;
   };
 
-  const safeParseState = (raw: any): GameState => {
-    return {
-      board: Array.isArray(raw?.board) && raw.board.length === 9 ? raw.board : EMPTY_BOARD,
-      playerX: raw?.playerX ?? null,
-      playerO: raw?.playerO ?? null,
-      currentTurn: raw?.currentTurn ?? "X",
-      winner: raw?.winner ?? "",
-      started: Boolean(raw?.started),
-      usernames: raw?.usernames || {},
-    };
-  };
-
-  const deriveMySymbol = (state: GameState, userId: string): Mark => {
-    if (!userId) return "";
-    if (state.playerX === userId) return "X";
-    if (state.playerO === userId) return "O";
-    return "";
-  };
-
   const connectToNakama = async () => {
+    if (!client) return;
     if (!username.trim()) {
-      setError("Please enter a username");
+      setError("Enter a username");
       return;
     }
 
     try {
-      setConnecting(true);
       setError("");
-      setStatus("Authenticating...");
+      setStatus("Connecting...");
 
       const deviceId = getDeviceId();
       const cleanUsername = username.trim().replace(/\s+/g, "_");
 
       const newSession = await client.authenticateDevice(deviceId, true);
-      const resolvedUserId =
-        (newSession as any).user_id ||
-        (newSession as any).userId ||
-        "";
 
       try {
-        await client.updateAccount(newSession, { username: cleanUsername } as any);
-      } catch (e) {
-        console.warn("Username update failed:", e);
+        await client.updateAccount(newSession, { username: cleanUsername });
+      } catch {
+        // ignore username update failure
       }
 
-      if (socketRef.current) {
-        try {
-          socketRef.current.disconnect(false);
-        } catch (e) {
-          console.warn("Previous socket disconnect failed:", e);
-        }
-      }
+      setSession(newSession);
+      setMyUserId((newSession as any).userId || (newSession as any).user_id || "");
 
       const socket = client.createSocket(useSSL, false);
       await socket.connect(newSession, true);
+      socketRef.current = socket;
 
       socket.onmatchdata = (matchData: MatchData) => {
-        try {
-          if (matchData.op_code !== 3) return;
+        if (matchData.op_code !== 3) return;
 
-          const decoded = new TextDecoder().decode(matchData.data);
-          const parsed = JSON.parse(decoded);
-          const nextState = safeParseState(parsed);
+        const decoded = new TextDecoder().decode(matchData.data);
+        const data = JSON.parse(decoded);
 
-          setGameState(nextState);
+        const nextState: GameState = {
+          board: Array.isArray(data.board) ? data.board : ["", "", "", "", "", "", "", "", ""],
+          playerX: data.playerX ?? null,
+          playerO: data.playerO ?? null,
+          currentTurn: data.currentTurn ?? "X",
+          winner: data.winner ?? "",
+          started: !!data.started,
+          usernames: data.usernames || {},
+        };
 
-          const mine = deriveMySymbol(nextState, resolvedUserId);
-          setMySymbol(mine);
+        setGameState(nextState);
 
-          if (!nextState.started) {
-            setStatus("Joined match. Waiting for opponent...");
-            return;
-          }
+        const mine: Mark =
+          nextState.playerX === (newSession as any).userId
+            ? "X"
+            : nextState.playerO === (newSession as any).userId
+            ? "O"
+            : "";
 
-          if (nextState.winner === "Draw") {
-            setStatus("It's a draw!");
-            return;
-          }
+        setMySymbol(mine);
 
-          if (nextState.winner && mine && nextState.winner === mine) {
-            setStatus("You won!");
-            confetti({
-              particleCount: 120,
-              spread: 70,
-              origin: { y: 0.65 },
-            });
-            return;
-          }
-
-          if (nextState.winner && mine && nextState.winner !== mine) {
-            setStatus("You lost!");
-            return;
-          }
-
-          if (nextState.currentTurn === mine) {
-            setStatus("Your turn");
-          } else {
-            setStatus("Opponent's turn");
-          }
-        } catch (e) {
-          console.error("Failed to parse match data:", e);
+        if (!nextState.started) {
+          setStatus("Waiting for second player to join...");
+          return;
         }
+
+        if (nextState.winner === "Draw") {
+          setStatus("Match draw!");
+          return;
+        }
+
+        if (nextState.winner && nextState.winner === mine) {
+          setStatus("You won!");
+          confetti({ particleCount: 120, spread: 70, origin: { y: 0.6 } });
+          return;
+        }
+
+        if (nextState.winner && nextState.winner !== mine) {
+          setStatus("You lost!");
+          return;
+        }
+
+        setStatus(nextState.currentTurn === mine ? "Your turn" : "Opponent's turn");
       };
 
-      socket.ondisconnect = (evt: any) => {
-        console.warn("Socket disconnected:", evt);
-        setStatus("Disconnected from server");
-      };
-
-      socket.onerror = (evt: any) => {
-        console.error("Socket error:", evt);
-      };
-
-      socketRef.current = socket;
-      setSession(newSession);
-      setMyUserId(resolvedUserId);
-      setStatus("Connected successfully");
-    } catch (err: any) {
-      console.error("Connection failed:", err);
-      setError(err?.message || "Failed to connect");
-      setStatus("Connection failed");
-    } finally {
-      setConnecting(false);
+      setStatus("Connected. Click Find Match.");
+    } catch (e: any) {
+      setError(e?.message || "Connection failed");
+      setStatus("Disconnected");
     }
   };
 
   const findMatch = async () => {
-    if (!session || !socketRef.current) {
-      setError("Please connect first");
+    if (!client || !session || !socketRef.current) {
+      setError("Connect first");
       return;
     }
 
     try {
-      setFinding(true);
       setError("");
       setGameState(null);
       setMatchId("");
       setMySymbol("");
       setStatus("Searching for opponent...");
 
-      const rpc: any = await client.rpc(session, "find_match", {} as any);
-      const parsed =
-        typeof rpc?.payload === "string"
-          ? JSON.parse(rpc.payload || "{}")
-          : rpc?.payload || {};
-
+      const rpc: any = await client.rpc(session, "find_match", {});
+      const parsed = typeof rpc.payload === "string" ? JSON.parse(rpc.payload) : rpc.payload;
       const id = parsed.matchId || parsed.match_id;
-      if (!id) {
-        throw new Error("No match ID returned from server");
-      }
 
-      const joined: any = await socketRef.current.joinMatch(String(id));
-      const joinedId = joined?.match_id || joined?.matchId || String(id);
+      if (!id) throw new Error("No matchId returned");
 
-      setMatchId(joinedId);
+      const joined = await socketRef.current.joinMatch(id);
+      setMatchId(joined.match_id);
       setStatus("Joined match. Waiting for opponent...");
-    } catch (err: any) {
-      console.error("Matchmaking failed:", err);
-      setError(err?.message || "Failed to find/join match");
-      setStatus("Matchmaking failed");
-    } finally {
-      setFinding(false);
+    } catch (e: any) {
+      setError(e?.message || "Matchmaking failed");
+      setStatus("Disconnected");
     }
   };
 
-  const leaveMatch = async () => {
-    if (!socketRef.current || !matchId) {
-      setMatchId("");
-      setGameState(null);
-      setMySymbol("");
-      setStatus("Left match");
-      return;
-    }
-
-    try {
-      await socketRef.current.leaveMatch(matchId);
-    } catch (e) {
-      console.warn("leaveMatch failed:", e);
-    } finally {
-      setMatchId("");
-      setGameState(null);
-      setMySymbol("");
-      setStatus("Left match");
-    }
-  };
-
-  const makeMove = async (index: number) => {
+  const makeMove = async (pos: number) => {
     if (!socketRef.current || !matchId || !gameState) return;
-    if (!gameState.started) return;
-    if (gameState.winner) return;
-    if (!mySymbol) return;
-    if (gameState.currentTurn !== mySymbol) return;
-    if (gameState.board[index]) return;
+    if (!mySymbol || gameState.currentTurn !== mySymbol) return;
+    if (gameState.winner || !gameState.started || gameState.board[pos]) return;
 
-    try {
-      await socketRef.current.sendMatchState(
-        matchId,
-        2,
-        JSON.stringify({ position: index })
-      );
-    } catch (err: any) {
-      console.error("Move failed:", err);
-      setError(err?.message || "Failed to send move");
-    }
+    await socketRef.current.sendMatchState(matchId, 2, JSON.stringify({ position: pos }));
   };
 
   const playAgain = async () => {
     if (!socketRef.current || !matchId) return;
-
-    try {
-      await socketRef.current.sendMatchState(matchId, 3, JSON.stringify({}));
-      setStatus("Restarting match...");
-    } catch (err: any) {
-      console.error("Play again failed:", err);
-      setError(err?.message || "Failed to restart match");
-    }
+    await socketRef.current.sendMatchState(matchId, 3, "{}");
   };
 
+  const leaveMatch = () => {
+    setMatchId("");
+    setGameState(null);
+    setMySymbol("");
+    setStatus("Connected. Click Find Match.");
+  };
+
+  useEffect(() => {
+    return () => {
+      socketRef.current?.disconnect(false);
+    };
+  }, []);
+
   return (
-    <div className="app-shell">
-      <div className="bg-orb orb-1" />
-      <div className="bg-orb orb-2" />
+    <div className="app">
+      <h1>Tic-Tac-Toe</h1>
+      <p>{status}</p>
+      {error && <p style={{ color: "red" }}>{error}</p>}
 
-      <main className="game-container">
-        <header className="hero">
-          <div className="badge">Realtime Multiplayer</div>
-          <h1>Tic-Tac-Toe</h1>
-          <p className="subtitle">
-            Connect two players, join the same match, and play live turns.
+      {!session ? (
+        <div>
+          <input
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            placeholder="Enter username"
+          />
+          <button onClick={connectToNakama}>Connect</button>
+        </div>
+      ) : !matchId ? (
+        <button onClick={findMatch}>Find Match</button>
+      ) : (
+        <div>
+          <p>You: {mySymbol || "-"}</p>
+          <p>
+            Opponent:{" "}
+            {gameState?.playerX && gameState?.playerO ? "Connected" : "Waiting..."}
           </p>
-        </header>
 
-        {!session ? (
-          <section className="panel auth-panel">
-            <h2>Connect</h2>
-            <div className="form-row">
-              <input
-                type="text"
-                placeholder="Enter your username"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                className="text-input"
-              />
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(3, 80px)",
+              gap: "8px",
+              marginTop: "20px",
+            }}
+          >
+            {(gameState?.board || ["", "", "", "", "", "", "", "", ""]).map((cell, i) => (
               <button
-                className="primary-btn"
-                onClick={connectToNakama}
-                disabled={connecting}
+                key={i}
+                onClick={() => makeMove(i)}
+                disabled={
+                  !gameState?.started ||
+                  !!cell ||
+                  !!gameState?.winner ||
+                  gameState.currentTurn !== mySymbol
+                }
+                style={{
+                  width: 80,
+                  height: 80,
+                  fontSize: 28,
+                }}
               >
-                {connecting ? "Connecting..." : "Connect"}
+                {cell}
               </button>
-            </div>
-            <p className="hint">
-              For testing, use one normal tab and one incognito tab if needed.
-            </p>
-          </section>
-        ) : (
-          <section className="panel lobby-panel">
-            <div className="lobby-top">
-              <div>
-                <h2>Welcome, {username || "Player"}</h2>
-                <p className="status-text">{status}</p>
-              </div>
-              <div className="actions">
-                {!matchId ? (
-                  <button
-                    className="primary-btn"
-                    onClick={findMatch}
-                    disabled={finding}
-                  >
-                    {finding ? "Finding..." : "Find Match"}
-                  </button>
-                ) : (
-                  <button className="danger-btn" onClick={leaveMatch}>
-                    Leave Match
-                  </button>
-                )}
-              </div>
-            </div>
+            ))}
+          </div>
 
-            {error ? <div className="error-box">{error}</div> : null}
-
-            <div className="players-panel">
-              <div className={`player-card ${mySymbol === "X" || mySymbol === "O" ? "active" : ""}`}>
-                <span className="player-label">You</span>
-                <strong>{myName}</strong>
-                <span className="player-meta">
-                  {mySymbol ? `Playing as ${mySymbol}` : "Waiting for symbol..."}
-                </span>
-              </div>
-
-              <div className="versus">VS</div>
-
-              <div className={`player-card ${opponentName ? "active" : ""}`}>
-                <span className="player-label">Opponent</span>
-                <strong>{opponentName || "Waiting..."}</strong>
-                <span className="player-meta">
-                  {opponentName ? "Connected" : "Not joined yet"}
-                </span>
-              </div>
-            </div>
-
-            <div className="board-wrap">
-              <div className="turn-banner">
-                {gameState?.winner
-                  ? gameState.winner === "Draw"
-                    ? "Draw game"
-                    : `Winner: ${gameState.winner}`
-                  : gameState?.started
-                  ? canPlay
-                    ? "Your turn"
-                    : "Opponent's turn"
-                  : "Waiting for opponent to join"}
-              </div>
-
-              <div className="board">
-                {(gameState?.board || EMPTY_BOARD).map((cell, index) => (
-                  <button
-                    key={index}
-                    className={`cell ${cell ? "filled" : ""} ${
-                      canPlay && !cell ? "playable" : ""
-                    }`}
-                    onClick={() => makeMove(index)}
-                    disabled={!canPlay || Boolean(cell)}
-                  >
-                    <span className={`mark mark-${cell || "empty"}`}>{cell}</span>
-                  </button>
-                ))}
-              </div>
-
-              {gameState?.winner ? (
-                <div className="bottom-actions">
-                  <button className="primary-btn" onClick={playAgain}>
-                    Play Again
-                  </button>
-                </div>
-              ) : null}
-            </div>
-          </section>
-        )}
-      </main>
+          <div style={{ marginTop: 16 }}>
+            {gameState?.winner && <button onClick={playAgain}>Play Again</button>}
+            <button onClick={leaveMatch}>Leave Match</button>
+          </div>
+        </div>
+      )}
     </div>
   );
-}
+};
 
 export default App;
