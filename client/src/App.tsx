@@ -13,9 +13,11 @@ interface GameState {
   board: (string | null)[];
   currentPlayer: string;
   players: Record<string, string>;
+  usernames: Record<string, string>;
   winner: string | null;
   gameOver: boolean;
   moveCount: number;
+  started: boolean;
 }
 
 interface MatchInfo {
@@ -38,8 +40,7 @@ const App: React.FC = () => {
   const host =
     process.env.REACT_APP_NAKAMA_HOST || 'tic-tac-toe-nakama-1-osku.onrender.com';
 
-  const port =
-    process.env.REACT_APP_NAKAMA_PORT || '443';
+  const port = process.env.REACT_APP_NAKAMA_PORT || '443';
 
   const useSSL =
     process.env.REACT_APP_NAKAMA_SSL
@@ -59,12 +60,26 @@ const App: React.FC = () => {
     const handleMatchData = (matchData: MatchData) => {
       try {
         const decoded = new TextDecoder().decode(matchData.data);
-        const data: GameState = JSON.parse(decoded);
-        setGameState(data);
+        const data = JSON.parse(decoded);
 
-        if (data.gameOver) {
-          if (data.winner) {
-            if (data.winner === myUserId) {
+        if (matchData.op_code === 4) {
+          setError(data?.error || 'Match error');
+          return;
+        }
+
+        const nextState: GameState = data;
+        setGameState(nextState);
+
+        const playerCount = Object.keys(nextState.players || {}).length;
+
+        if (playerCount < 2 || !nextState.started) {
+          setStatus('Waiting for opponent to join...');
+          return;
+        }
+
+        if (nextState.gameOver) {
+          if (nextState.winner) {
+            if (nextState.winner === myUserId) {
               setStatus('🎉 You won!');
               confetti({
                 particleCount: 120,
@@ -77,7 +92,7 @@ const App: React.FC = () => {
           } else {
             setStatus('🤝 Match draw!');
           }
-        } else if (data.currentPlayer === myUserId) {
+        } else if (nextState.currentPlayer === myUserId) {
           setStatus('Your turn');
         } else {
           setStatus("Opponent's turn");
@@ -87,8 +102,15 @@ const App: React.FC = () => {
       }
     };
 
-    const handleMatchPresence = (_presenceEvent: MatchPresenceEvent) => {
-      setStatus('Opponent joined!');
+    const handleMatchPresence = (presenceEvent: MatchPresenceEvent) => {
+      const joins = presenceEvent.joins?.length || 0;
+      const leaves = presenceEvent.leaves?.length || 0;
+
+      if (joins > 0) {
+        setStatus('Opponent joined! Starting game...');
+      } else if (leaves > 0) {
+        setStatus('Opponent left the match');
+      }
     };
 
     socket.onmatchdata = handleMatchData;
@@ -137,8 +159,9 @@ const App: React.FC = () => {
       setSession(newSession);
 
       const resolvedUserId =
-        (newSession as any).user_id ||
         (newSession as any).userId ||
+        (newSession as any).user_id ||
+        (newSession as any).id ||
         '';
 
       setMyUserId(resolvedUserId);
@@ -167,6 +190,7 @@ const App: React.FC = () => {
 
     try {
       setError(null);
+      setGameState(null);
       setStatus('Searching for opponent...');
 
       const rpc: any = await client.rpc(session, 'find_match', {});
@@ -187,10 +211,7 @@ const App: React.FC = () => {
 
       console.log('Parsed RPC payload:', parsed);
 
-      const matchId =
-        parsed.matchId ||
-        parsed.match_id ||
-        (Array.isArray(parsed.matchIds) ? parsed.matchIds[0] : undefined);
+      const matchId = parsed.matchId || parsed.match_id;
 
       if (!matchId) {
         throw new Error('No valid match ID returned from RPC');
@@ -198,7 +219,7 @@ const App: React.FC = () => {
 
       const joined = await socketRef.current.joinMatch(String(matchId));
       setMatch({ match_id: joined.match_id });
-      setStatus('Match found! Game starts soon...');
+      setStatus('Joined match. Waiting for opponent...');
     } catch (err: any) {
       console.error('Matchmaking error:', err);
       setError(`Matchmaking failed: ${err?.message || 'Unknown error'}`);
@@ -207,6 +228,7 @@ const App: React.FC = () => {
 
   const makeMove = async (pos: number) => {
     if (!socketRef.current || !match || !gameState) return;
+    if (!gameState.started) return;
     if (gameState.gameOver) return;
     if (gameState.currentPlayer !== myUserId) return;
     if (gameState.board[pos]) return;
@@ -223,9 +245,22 @@ const App: React.FC = () => {
     }
   };
 
+  const restartGame = async () => {
+    if (!socketRef.current || !match || !gameState?.gameOver) return;
+
+    try {
+      await socketRef.current.sendMatchState(match.match_id, 3, '{}');
+      setError(null);
+    } catch (err: any) {
+      console.error('Restart failed:', err);
+      setError(`Restart failed: ${err?.message || 'Unknown error'}`);
+    }
+  };
+
   const leaveMatch = () => {
     setMatch(null);
     setGameState(null);
+    setError(null);
     setStatus('Ready to find a new match');
   };
 
@@ -236,6 +271,16 @@ const App: React.FC = () => {
       }
     };
   }, []);
+
+  const mySymbol =
+    gameState && myUserId ? gameState.players?.[myUserId] || '-' : '-';
+
+  const opponentEntry =
+    gameState
+      ? Object.entries(gameState.usernames || {}).find(([id]) => id !== myUserId)
+      : undefined;
+
+  const opponentName = opponentEntry?.[1] || 'Waiting...';
 
   return (
     <div className="app">
@@ -281,32 +326,47 @@ const App: React.FC = () => {
 
             <div className="players">
               <div className="player me">
-                <span className="symbol">You</span>
+                <span className="symbol">You ({mySymbol})</span>
                 <span className="name">{username}</span>
+              </div>
+
+              <div className="player opponent">
+                <span className="symbol">Opponent</span>
+                <span className="name">{opponentName}</span>
               </div>
             </div>
 
-            <div className="game-board">
-              {gameState?.board.map((cell, i) => {
-                const clickable =
-                  !cell &&
-                  !gameState.gameOver &&
-                  gameState.currentPlayer === myUserId;
+            {!gameState || !gameState.started ? (
+              <div className="waiting-box">Waiting for second player to join...</div>
+            ) : (
+              <div className="game-board">
+                {gameState.board.map((cell, i) => {
+                  const clickable =
+                    !cell &&
+                    !gameState.gameOver &&
+                    gameState.currentPlayer === myUserId;
 
-                return (
-                  <button
-                    key={i}
-                    className={`cell ${cell ? 'filled' : ''} ${clickable ? 'active' : ''}`}
-                    onClick={() => makeMove(i)}
-                    disabled={!clickable}
-                  >
-                    {cell}
-                  </button>
-                );
-              })}
-            </div>
+                  return (
+                    <button
+                      key={i}
+                      className={`cell ${cell ? 'filled' : ''} ${clickable ? 'active' : ''}`}
+                      onClick={() => makeMove(i)}
+                      disabled={!clickable}
+                    >
+                      {cell}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
 
             <div className="game-controls">
+              {gameState?.gameOver && (
+                <button className="restart-btn" onClick={restartGame}>
+                  Play Again
+                </button>
+              )}
+
               <button className="leave-match-btn" onClick={leaveMatch}>
                 Leave Match
               </button>
