@@ -24,6 +24,7 @@ function App() {
   const [finalUsername, setFinalUsername] = useState<string>("");
   const [matchId, setMatchId] = useState<string>("");
   const [joinMatchId, setJoinMatchId] = useState<string>("");
+  const [matchmakerTicket, setMatchmakerTicket] = useState<string>("");
   const [board, setBoard] = useState<CellValue[]>(EMPTY_BOARD);
   const [currentTurn, setCurrentTurn] = useState<"X" | "O">("X");
   const [winner, setWinner] = useState<string>("");
@@ -64,16 +65,34 @@ function App() {
     setStarted(false);
   };
 
-  const disconnectSocket = (): void => {
+  const disconnectSocket = async (): Promise<void> => {
     const socket = socketRef.current;
+
+    if (socket && matchmakerTicket) {
+      try {
+        await (socket as any).removeMatchmaker(matchmakerTicket);
+      } catch (err) {
+        console.warn("Failed to remove matchmaker ticket:", err);
+      }
+    }
+
+    setMatchmakerTicket("");
+
     if (socket) {
       const anySocket = socket as unknown as {
-        disconnect?: () => void;
+        disconnect?: (graceful?: boolean) => void;
         close?: () => void;
       };
 
-      if (typeof anySocket.disconnect === "function") anySocket.disconnect();
-      else if (typeof anySocket.close === "function") anySocket.close();
+      try {
+        if (typeof anySocket.disconnect === "function") {
+          anySocket.disconnect(false);
+        } else if (typeof anySocket.close === "function") {
+          anySocket.close();
+        }
+      } catch (err) {
+        console.warn("Socket disconnect issue:", err);
+      }
     }
 
     socketRef.current = null;
@@ -94,8 +113,8 @@ function App() {
 
     try {
       await client.updateAccount(authSession, {
-  username: safeName,
-});
+        username: safeName,
+      });
     } catch (err: unknown) {
       console.warn("updateAccount failed:", err);
     }
@@ -112,6 +131,7 @@ function App() {
 
     anySocket.ondisconnect = () => {
       setSocketConnected(false);
+      setMatchmakerTicket("");
       setMessage("Socket disconnected.");
     };
 
@@ -124,12 +144,21 @@ function App() {
 
         const payload = JSON.parse(decoded);
 
-        if (Array.isArray(payload.board)) setBoard(payload.board);
+        if (Array.isArray(payload.board)) {
+          setBoard(payload.board);
+        }
+
         if (payload.currentTurn === "X" || payload.currentTurn === "O") {
           setCurrentTurn(payload.currentTurn);
         }
-        if (typeof payload.winner === "string") setWinner(payload.winner);
-        if (typeof payload.started === "boolean") setStarted(payload.started);
+
+        if (typeof payload.winner === "string") {
+          setWinner(payload.winner);
+        }
+
+        if (typeof payload.started === "boolean") {
+          setStarted(payload.started);
+        }
       } catch (err) {
         console.error("Failed to parse match data:", err);
       }
@@ -137,22 +166,35 @@ function App() {
 
     anySocket.onmatchmakermatched = async (matched: any) => {
       try {
-        const joined = await (socket as any).joinMatch(matched);
-        setMatchId(joined.match_id || joined.matchId || joined.id || "");
+        const joinTarget = matched?.token || matched?.match_id;
+
+        if (!joinTarget) {
+          throw new Error("No match token or match_id received from matchmaker.");
+        }
+
+        const joined = await (socket as any).joinMatch(joinTarget);
+        const joinedId =
+          joined?.match_id || joined?.matchId || matched?.match_id || "";
+
+        setMatchmakerTicket("");
+        setMatchId(joinedId);
         resetBoard();
         setStarted(true);
         setStatus("success");
         setMessage("Match found and joined successfully.");
       } catch (err: unknown) {
         console.error("Matchmaker join failed:", err);
+        const e = err as { message?: string };
         setStatus("error");
-        setMessage("Failed to join matched game.");
+        setMessage(
+          e?.message || "Failed to join matched game. Check backend match setup."
+        );
       }
     };
   };
 
   const connectSocket = async (authSession: Session): Promise<Socket> => {
-    disconnectSocket();
+    await disconnectSocket();
 
     const socket = client.createSocket(USE_SSL, false);
     attachSocketEvents(socket);
@@ -160,6 +202,7 @@ function App() {
     await socket.connect(authSession, true);
     socketRef.current = socket;
     setSocketConnected(true);
+
     return socket;
   };
 
@@ -202,8 +245,10 @@ function App() {
       }
 
       const result = await (socket as any).createMatch();
-      const createdId = result.match_id || result.matchId || result.id || "";
+      const createdId = result?.match_id || result?.matchId || result?.id || "";
+
       setMatchId(createdId);
+      setMatchmakerTicket("");
       resetBoard();
       setStarted(true);
       setMessage("Game created successfully. Share Match ID to join.");
@@ -230,7 +275,9 @@ function App() {
       }
 
       const result = await (socket as any).joinMatch(id);
-      const joinedId = result.match_id || result.matchId || result.id || id;
+      const joinedId = result?.match_id || result?.matchId || result?.id || id;
+
+      setMatchmakerTicket("");
       setMatchId(joinedId);
       resetBoard();
       setStarted(true);
@@ -251,9 +298,22 @@ function App() {
         return;
       }
 
-      await (socket as any).addMatchmaker("*", 2, 2);
+      if (!socketConnected) {
+        setMessage("Socket is not connected.");
+        return;
+      }
+
+      if (matchmakerTicket) {
+        setMessage("Matchmaking is already in progress.");
+        return;
+      }
+
+      const response = await (socket as any).addMatchmaker("*", 2, 2);
+      const ticket = response?.ticket || "";
+
+      setMatchmakerTicket(ticket);
       setStatus("loading");
-      setMessage("Finding a player...");
+      setMessage("Finding a player... Open another client and search there too.");
     } catch (err: unknown) {
       console.error("Matchmaker error:", err);
       const e = err as { message?: string };
@@ -262,9 +322,30 @@ function App() {
     }
   };
 
-  const handleResetDevice = (): void => {
+  const handleCancelMatchmaking = async (): Promise<void> => {
+    try {
+      const socket = socketRef.current;
+
+      if (!socket || !matchmakerTicket) {
+        setMessage("No active matchmaking ticket.");
+        return;
+      }
+
+      await (socket as any).removeMatchmaker(matchmakerTicket);
+      setMatchmakerTicket("");
+      setStatus("success");
+      setMessage("Matchmaking cancelled.");
+    } catch (err: unknown) {
+      console.error("Cancel matchmaking error:", err);
+      const e = err as { message?: string };
+      setStatus("error");
+      setMessage(e?.message || "Failed to cancel matchmaking.");
+    }
+  };
+
+  const handleResetDevice = async (): Promise<void> => {
     localStorage.removeItem("nakama-device-id");
-    disconnectSocket();
+    await disconnectSocket();
     setSession(null);
     setUserId("");
     setFinalUsername("");
@@ -278,7 +359,7 @@ function App() {
 
   useEffect(() => {
     return () => {
-      disconnectSocket();
+      void disconnectSocket();
     };
   }, []);
 
@@ -627,6 +708,23 @@ function App() {
             >
               Find Player
             </button>
+
+            <button
+              onClick={handleCancelMatchmaking}
+              style={{
+                padding: "14px 20px",
+                borderRadius: "16px",
+                border: "none",
+                background: "#dc2626",
+                color: "#fff",
+                fontWeight: 700,
+                fontSize: "15px",
+                cursor: "pointer",
+                minWidth: "160px",
+              }}
+            >
+              Cancel Matchmaking
+            </button>
           </div>
 
           <input
@@ -671,6 +769,7 @@ function App() {
               borderRadius: "18px",
               padding: "18px",
               border: "1px solid #e2e8f0",
+              marginBottom: "14px",
             }}
           >
             <p style={{ margin: 0, color: "#64748b", fontSize: "13px" }}>
@@ -686,6 +785,30 @@ function App() {
               }}
             >
               {matchId || "-"}
+            </p>
+          </div>
+
+          <div
+            style={{
+              background: "#f8fafc",
+              borderRadius: "18px",
+              padding: "18px",
+              border: "1px solid #e2e8f0",
+            }}
+          >
+            <p style={{ margin: 0, color: "#64748b", fontSize: "13px" }}>
+              Matchmaker Ticket
+            </p>
+            <p
+              style={{
+                margin: "8px 0 0 0",
+                color: "#0f172a",
+                fontWeight: 700,
+                fontSize: "14px",
+                wordBreak: "break-word",
+              }}
+            >
+              {matchmakerTicket || "-"}
             </p>
           </div>
         </div>
