@@ -9,14 +9,15 @@ import {
 import confetti from 'canvas-confetti';
 import './App.css';
 
+type Mark = '' | 'X' | 'O';
+type Winner = '' | 'X' | 'O' | 'Draw';
+
 interface GameState {
-  board: (string | null)[];
-  currentPlayer: string;
-  players: Record<string, string>;
-  usernames: Record<string, string>;
-  winner: string | null;
-  gameOver: boolean;
-  moveCount: number;
+  board: Mark[];
+  playerX: string | null;
+  playerO: string | null;
+  currentTurn: Mark;
+  winner: Winner;
   started: boolean;
 }
 
@@ -37,11 +38,12 @@ const App: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState('');
 
+  const [mySymbol, setMySymbol] = useState<Mark>('');
+  const [opponentConnected, setOpponentConnected] = useState(false);
+
   const host =
     process.env.REACT_APP_NAKAMA_HOST || 'tic-tac-toe-nakama-1-osku.onrender.com';
-
   const port = process.env.REACT_APP_NAKAMA_PORT || '443';
-
   const useSSL =
     process.env.REACT_APP_NAKAMA_SSL
       ? process.env.REACT_APP_NAKAMA_SSL === 'true'
@@ -52,75 +54,6 @@ const App: React.FC = () => {
     setClient(nakamaClient);
     setStatus(`Server ready: ${useSSL ? 'wss' : 'ws'}://${host}:${port}`);
   }, [host, port, useSSL]);
-
-  useEffect(() => {
-    const socket = socketRef.current;
-    if (!socket) return;
-
-    const handleMatchData = (matchData: MatchData) => {
-      try {
-        const decoded = new TextDecoder().decode(matchData.data);
-        const data = JSON.parse(decoded);
-
-        if (matchData.op_code === 4) {
-          setError(data?.error || 'Match error');
-          return;
-        }
-
-        const nextState: GameState = data;
-        setGameState(nextState);
-
-        const playerCount = Object.keys(nextState.players || {}).length;
-
-        if (playerCount < 2 || !nextState.started) {
-          setStatus('Waiting for opponent to join...');
-          return;
-        }
-
-        if (nextState.gameOver) {
-          if (nextState.winner) {
-            if (nextState.winner === myUserId) {
-              setStatus('🎉 You won!');
-              confetti({
-                particleCount: 120,
-                spread: 70,
-                origin: { y: 0.6 },
-              });
-            } else {
-              setStatus('😢 You lost!');
-            }
-          } else {
-            setStatus('🤝 Match draw!');
-          }
-        } else if (nextState.currentPlayer === myUserId) {
-          setStatus('Your turn');
-        } else {
-          setStatus("Opponent's turn");
-        }
-      } catch (err) {
-        console.error('Match data parse error:', err);
-      }
-    };
-
-    const handleMatchPresence = (presenceEvent: MatchPresenceEvent) => {
-      const joins = presenceEvent.joins?.length || 0;
-      const leaves = presenceEvent.leaves?.length || 0;
-
-      if (joins > 0) {
-        setStatus('Opponent joined! Starting game...');
-      } else if (leaves > 0) {
-        setStatus('Opponent left the match');
-      }
-    };
-
-    socket.onmatchdata = handleMatchData;
-    socket.onmatchpresence = handleMatchPresence;
-
-    return () => {
-      socket.onmatchdata = (_matchData: MatchData) => {};
-      socket.onmatchpresence = (_presenceEvent: MatchPresenceEvent) => {};
-    };
-  }, [myUserId]);
 
   const getDeviceId = useCallback(() => {
     const key = 'nakama-device-id';
@@ -150,11 +83,13 @@ const App: React.FC = () => {
       const deviceId = getDeviceId();
       const cleanUsername = username.trim().replace(/\s+/g, '_');
 
-      const newSession = await client.authenticateDevice(
-        deviceId,
-        true,
-        cleanUsername
-      );
+      const newSession = await client.authenticateDevice(deviceId, true);
+
+      try {
+        await client.updateAccount(newSession, { username: cleanUsername });
+      } catch (e) {
+        console.warn('Username update failed:', e);
+      }
 
       setSession(newSession);
 
@@ -182,6 +117,96 @@ const App: React.FC = () => {
     }
   };
 
+  useEffect(() => {
+    const socket = socketRef.current;
+    if (!socket) return;
+
+    const handleMatchData = (matchData: MatchData) => {
+      try {
+        const decoded = new TextDecoder().decode(matchData.data);
+        const data = JSON.parse(decoded);
+
+        if (matchData.op_code === 4) {
+          setError(data?.error || 'Match error');
+          return;
+        }
+
+        if (matchData.op_code !== 3) return;
+
+        const nextState: GameState = {
+          board: Array.isArray(data.board) ? data.board : ['', '', '', '', '', '', '', '', ''],
+          playerX: data.playerX ?? null,
+          playerO: data.playerO ?? null,
+          currentTurn: data.currentTurn ?? 'X',
+          winner: data.winner ?? '',
+          started: Boolean(data.started),
+        };
+
+        setGameState(nextState);
+
+        const mine: Mark =
+          nextState.playerX === myUserId
+            ? 'X'
+            : nextState.playerO === myUserId
+            ? 'O'
+            : '';
+
+        setMySymbol(mine);
+
+        const hasOpponent =
+          !!myUserId &&
+          ((mine === 'X' && !!nextState.playerO) || (mine === 'O' && !!nextState.playerX));
+
+        setOpponentConnected(hasOpponent);
+
+        if (!nextState.started || !nextState.playerX || !nextState.playerO) {
+          setStatus('Waiting for second player to join...');
+          return;
+        }
+
+        if (nextState.winner === 'Draw') {
+          setStatus('🤝 Match draw!');
+          return;
+        }
+
+        if (nextState.winner === mine && mine) {
+          setStatus('🎉 You won!');
+          confetti({
+            particleCount: 120,
+            spread: 70,
+            origin: { y: 0.6 },
+          });
+          return;
+        }
+
+        if (nextState.winner && nextState.winner !== mine) {
+          setStatus('😢 You lost!');
+          return;
+        }
+
+        if (nextState.currentTurn === mine) {
+          setStatus('Your turn');
+        } else {
+          setStatus("Opponent's turn");
+        }
+      } catch (err) {
+        console.error('Match data parse error:', err);
+      }
+    };
+
+    const handleMatchPresence = (_presenceEvent: MatchPresenceEvent) => {
+      setStatus('Player joined/left. Syncing match state...');
+    };
+
+    socket.onmatchdata = handleMatchData;
+    socket.onmatchpresence = handleMatchPresence;
+
+    return () => {
+      socket.onmatchdata = (_matchData: MatchData) => {};
+      socket.onmatchpresence = (_presenceEvent: MatchPresenceEvent) => {};
+    };
+  }, [myUserId, mySymbol]);
+
   const findMatch = async () => {
     if (!client || !session || !socketRef.current) {
       setError('Not connected properly');
@@ -191,6 +216,9 @@ const App: React.FC = () => {
     try {
       setError(null);
       setGameState(null);
+      setMatch(null);
+      setMySymbol('');
+      setOpponentConnected(false);
       setStatus('Searching for opponent...');
 
       const rpc: any = await client.rpc(session, 'find_match', {});
@@ -199,13 +227,10 @@ const App: React.FC = () => {
       let parsed: any = {};
 
       if (typeof rpc?.payload === 'string') {
-        console.log('Raw RPC payload string:', rpc.payload);
         parsed = JSON.parse(rpc.payload || '{}');
       } else if (rpc?.payload && typeof rpc.payload === 'object') {
-        console.log('Raw RPC payload object:', rpc.payload);
         parsed = rpc.payload;
       } else {
-        console.log('RPC payload missing, checking root object');
         parsed = rpc || {};
       }
 
@@ -229,8 +254,9 @@ const App: React.FC = () => {
   const makeMove = async (pos: number) => {
     if (!socketRef.current || !match || !gameState) return;
     if (!gameState.started) return;
-    if (gameState.gameOver) return;
-    if (gameState.currentPlayer !== myUserId) return;
+    if (gameState.winner) return;
+    if (!mySymbol) return;
+    if (gameState.currentTurn !== mySymbol) return;
     if (gameState.board[pos]) return;
 
     try {
@@ -245,21 +271,15 @@ const App: React.FC = () => {
     }
   };
 
-  const restartGame = async () => {
-    if (!socketRef.current || !match || !gameState?.gameOver) return;
-
-    try {
-      await socketRef.current.sendMatchState(match.match_id, 3, '{}');
-      setError(null);
-    } catch (err: any) {
-      console.error('Restart failed:', err);
-      setError(`Restart failed: ${err?.message || 'Unknown error'}`);
-    }
+  const restartGame = () => {
+    setStatus('Play Again is not implemented in server yet');
   };
 
   const leaveMatch = () => {
     setMatch(null);
     setGameState(null);
+    setMySymbol('');
+    setOpponentConnected(false);
     setError(null);
     setStatus('Ready to find a new match');
   };
@@ -272,15 +292,7 @@ const App: React.FC = () => {
     };
   }, []);
 
-  const mySymbol =
-    gameState && myUserId ? gameState.players?.[myUserId] || '-' : '-';
-
-  const opponentEntry =
-    gameState
-      ? Object.entries(gameState.usernames || {}).find(([id]) => id !== myUserId)
-      : undefined;
-
-  const opponentName = opponentEntry?.[1] || 'Waiting...';
+  const opponentName = opponentConnected ? 'Connected' : 'Waiting...';
 
   return (
     <div className="app">
@@ -326,7 +338,7 @@ const App: React.FC = () => {
 
             <div className="players">
               <div className="player me">
-                <span className="symbol">You ({mySymbol})</span>
+                <span className="symbol">You ({mySymbol || '-'})</span>
                 <span className="name">{username}</span>
               </div>
 
@@ -343,8 +355,9 @@ const App: React.FC = () => {
                 {gameState.board.map((cell, i) => {
                   const clickable =
                     !cell &&
-                    !gameState.gameOver &&
-                    gameState.currentPlayer === myUserId;
+                    !gameState.winner &&
+                    mySymbol !== '' &&
+                    gameState.currentTurn === mySymbol;
 
                   return (
                     <button
@@ -361,7 +374,7 @@ const App: React.FC = () => {
             )}
 
             <div className="game-controls">
-              {gameState?.gameOver && (
+              {gameState?.winner && (
                 <button className="restart-btn" onClick={restartGame}>
                   Play Again
                 </button>
