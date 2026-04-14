@@ -14,6 +14,15 @@ interface MatchState {
   winner: Winner;
   started: boolean;
   usernames: { [userId: string]: string };
+  open: boolean;
+}
+
+interface RpcFindMatchRequest {
+  create?: boolean;
+}
+
+interface RpcFindMatchResponse {
+  matchId: string;
 }
 
 function createBoard(): Mark[] {
@@ -59,6 +68,14 @@ function resetGame(state: MatchState): void {
   state.currentTurn = "X";
   state.winner = "";
   state.started = state.playerX !== null && state.playerO !== null;
+  state.open = !(state.playerX !== null && state.playerO !== null);
+}
+
+function buildLabel(state: MatchState): string {
+  return JSON.stringify({
+    open: state.open ? 1 : 0,
+    started: state.started ? 1 : 0,
+  });
 }
 
 function buildStatePayload(state: MatchState): string {
@@ -80,6 +97,51 @@ function broadcastGameState(
   dispatcher.broadcastMessage(3, buildStatePayload(state), null, null);
 }
 
+const rpcFindMatch: nkruntime.RpcFunction = function (
+  ctx: nkruntime.Context,
+  logger: nkruntime.Logger,
+  nk: nkruntime.Nakama,
+  payload: string
+): string {
+  if (!ctx.userId) {
+    throw new Error("No user ID in context.");
+  }
+
+  let request: RpcFindMatchRequest = {};
+  if (payload) {
+    try {
+      request = JSON.parse(payload);
+    } catch (error) {
+      logger.warn("Failed to parse find_match payload, using defaults.");
+    }
+  }
+
+  let matches: nkruntime.Match[] = [];
+  try {
+    matches = nk.matchList(10, true, MODULE_NAME, 0, 1, "+label.open:1");
+  } catch (error) {
+    logger.error("Error listing matches: %v", error);
+    throw error;
+  }
+
+  if (matches.length > 0) {
+    const existingMatchId = matches[0].matchId;
+    logger.info("Found open match: %s", existingMatchId);
+    const response: RpcFindMatchResponse = { matchId: existingMatchId };
+    return JSON.stringify(response);
+  }
+
+  try {
+    const newMatchId = nk.matchCreate(MODULE_NAME, {});
+    logger.info("Created new match: %s", newMatchId);
+    const response: RpcFindMatchResponse = { matchId: newMatchId };
+    return JSON.stringify(response);
+  } catch (error) {
+    logger.error("Error creating match: %v", error);
+    throw error;
+  }
+};
+
 let matchInit = function (
   ctx: nkruntime.Context,
   logger: nkruntime.Logger,
@@ -96,6 +158,7 @@ let matchInit = function (
     winner: "",
     started: false,
     usernames: {},
+    open: true,
   };
 
   logger.info("Tic-tac-toe match created.");
@@ -103,7 +166,7 @@ let matchInit = function (
   return {
     state,
     tickRate: TICK_RATE,
-    label: "tic-tac-toe",
+    label: buildLabel(state),
   };
 };
 
@@ -159,10 +222,18 @@ let matchJoin = function (
   }
 
   if (state.playerX !== null && state.playerO !== null) {
-    resetGame(state);
+    state.board = createBoard();
+    state.currentTurn = "X";
+    state.winner = "";
+    state.started = true;
+    state.open = false;
     logger.info("Game started automatically with 2 players.");
+  } else {
+    state.started = false;
+    state.open = true;
   }
 
+  dispatcher.matchLabelUpdate(buildLabel(state));
   broadcastGameState(dispatcher, state);
 
   return { state };
@@ -194,11 +265,13 @@ let matchLeave = function (
 
   if (state.playerX === null || state.playerO === null) {
     state.started = false;
+    state.open = true;
     state.board = createBoard();
     state.currentTurn = "X";
     state.winner = "";
   }
 
+  dispatcher.matchLabelUpdate(buildLabel(state));
   broadcastGameState(dispatcher, state);
 
   return { state };
@@ -220,6 +293,8 @@ let matchLoop = function (
     if (message.opCode === 3) {
       if (state.playerX !== null && state.playerO !== null) {
         resetGame(state);
+        state.open = false;
+        dispatcher.matchLabelUpdate(buildLabel(state));
         logger.info("Game restarted.");
         broadcastGameState(dispatcher, state);
       }
@@ -303,6 +378,8 @@ function InitModule(
   nk: nkruntime.Nakama,
   initializer: nkruntime.Initializer
 ): void {
+  initializer.registerRpc("find_match", rpcFindMatch);
+
   initializer.registerMatch(MODULE_NAME, {
     matchInit,
     matchJoinAttempt,
@@ -312,5 +389,5 @@ function InitModule(
     matchTerminate,
   });
 
-  logger.info("Tic-tac-toe match handler registered.");
+  logger.info("Tic-tac-toe backend registered successfully.");
 }
