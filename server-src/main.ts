@@ -13,6 +13,7 @@ interface MatchState {
   currentTurn: Mark;
   winner: Winner;
   started: boolean;
+  usernames: { [userId: string]: string };
 }
 
 function createBoard(): Mark[] {
@@ -48,15 +49,16 @@ function checkWinner(board: Mark[]): Winner {
 }
 
 function getMark(state: MatchState, userId: string): Mark {
-  if (state.playerX === userId) {
-    return "X";
-  }
-
-  if (state.playerO === userId) {
-    return "O";
-  }
-
+  if (state.playerX === userId) return "X";
+  if (state.playerO === userId) return "O";
   return "";
+}
+
+function resetGame(state: MatchState): void {
+  state.board = createBoard();
+  state.currentTurn = "X";
+  state.winner = "";
+  state.started = state.playerX !== null && state.playerO !== null;
 }
 
 function buildStatePayload(state: MatchState): string {
@@ -67,6 +69,7 @@ function buildStatePayload(state: MatchState): string {
     currentTurn: state.currentTurn,
     winner: state.winner,
     started: state.started,
+    usernames: state.usernames,
   });
 }
 
@@ -92,12 +95,13 @@ let matchInit = function (
     currentTurn: "X",
     winner: "",
     started: false,
+    usernames: {},
   };
 
   logger.info("Tic-tac-toe match created.");
 
   return {
-    state: state,
+    state,
     tickRate: TICK_RATE,
     label: "tic-tac-toe",
   };
@@ -117,7 +121,7 @@ let matchJoinAttempt = function (
 
   if (currentSize >= 2) {
     return {
-      state: state,
+      state,
       accept: false,
       rejectMessage: "Match is full.",
     };
@@ -126,7 +130,7 @@ let matchJoinAttempt = function (
   state.joinsInProgress += 1;
 
   return {
-    state: state,
+    state,
     accept: true,
   };
 };
@@ -142,7 +146,9 @@ let matchJoin = function (
 ): { state: MatchState } {
   for (let i = 0; i < presences.length; i++) {
     const presence = presences[i];
+
     state.presences[presence.userId] = presence;
+    state.usernames[presence.userId] = presence.username || "Player";
     state.joinsInProgress = Math.max(0, state.joinsInProgress - 1);
 
     if (state.playerX === null) {
@@ -153,18 +159,13 @@ let matchJoin = function (
   }
 
   if (state.playerX !== null && state.playerO !== null) {
-    state.started = true;
-    state.currentTurn = "X";
-    state.winner = "";
-    state.board = createBoard();
-    logger.info("Game started.");
+    resetGame(state);
+    logger.info("Game started automatically with 2 players.");
   }
 
   broadcastGameState(dispatcher, state);
 
-  return {
-    state: state,
-  };
+  return { state };
 };
 
 let matchLeave = function (
@@ -178,7 +179,9 @@ let matchLeave = function (
 ): { state: MatchState } {
   for (let i = 0; i < presences.length; i++) {
     const presence = presences[i];
+
     delete state.presences[presence.userId];
+    delete state.usernames[presence.userId];
 
     if (state.playerX === presence.userId) {
       state.playerX = null;
@@ -198,9 +201,7 @@ let matchLeave = function (
 
   broadcastGameState(dispatcher, state);
 
-  return {
-    state: state,
-  };
+  return { state };
 };
 
 let matchLoop = function (
@@ -215,15 +216,29 @@ let matchLoop = function (
   for (let i = 0; i < messages.length; i++) {
     const message = messages[i];
     const userId = message.sender.userId;
-    const mark = getMark(state, userId);
 
-    if (state.started === false) {
+    if (message.opCode === 3) {
+      if (state.playerX !== null && state.playerO !== null) {
+        resetGame(state);
+        logger.info("Game restarted.");
+        broadcastGameState(dispatcher, state);
+      }
+      continue;
+    }
+
+    if (message.opCode !== 2) {
+      continue;
+    }
+
+    if (!state.started) {
       continue;
     }
 
     if (state.winner !== "") {
       continue;
     }
+
+    const mark = getMark(state, userId);
 
     if (mark === "") {
       continue;
@@ -266,9 +281,7 @@ let matchLoop = function (
     broadcastGameState(dispatcher, state);
   }
 
-  return {
-    state: state,
-  };
+  return { state };
 };
 
 let matchTerminate = function (
@@ -281,10 +294,7 @@ let matchTerminate = function (
   graceSeconds: number
 ): { state: MatchState } {
   logger.info("Match terminated.");
-
-  return {
-    state: state,
-  };
+  return { state };
 };
 
 function InitModule(
@@ -294,12 +304,12 @@ function InitModule(
   initializer: nkruntime.Initializer
 ): void {
   initializer.registerMatch(MODULE_NAME, {
-    matchInit: matchInit,
-    matchJoinAttempt: matchJoinAttempt,
-    matchJoin: matchJoin,
-    matchLeave: matchLeave,
-    matchLoop: matchLoop,
-    matchTerminate: matchTerminate,
+    matchInit,
+    matchJoinAttempt,
+    matchJoin,
+    matchLeave,
+    matchLoop,
+    matchTerminate,
   });
 
   logger.info("Tic-tac-toe match handler registered.");
