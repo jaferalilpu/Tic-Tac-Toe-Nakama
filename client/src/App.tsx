@@ -29,13 +29,16 @@ function App() {
   const [message, setMessage] = useState<string>(
     "Login, then create or join a game."
   );
+
   const [session, setSession] = useState<Session | null>(null);
   const [socketConnected, setSocketConnected] = useState<boolean>(false);
   const [userId, setUserId] = useState<string>("");
   const [finalUsername, setFinalUsername] = useState<string>("");
+
   const [matchId, setMatchId] = useState<string>("");
   const [joinMatchId, setJoinMatchId] = useState<string>("");
   const [matchmakerTicket, setMatchmakerTicket] = useState<string>("");
+
   const [board, setBoard] = useState<CellValue[]>(EMPTY_BOARD);
   const [currentTurn, setCurrentTurn] = useState<"X" | "O">("X");
   const [winner, setWinner] = useState<string>("");
@@ -89,18 +92,12 @@ function App() {
         newBoard[a] === newBoard[b] &&
         newBoard[a] === newBoard[c]
       ) {
-        return {
-          winner: newBoard[a],
-          winningCells: combo,
-        };
+        return { winner: newBoard[a], winningCells: combo };
       }
     }
 
     if (newBoard.every((cell) => cell !== "")) {
-      return {
-        winner: "Draw",
-        winningCells: [],
-      };
+      return { winner: "Draw", winningCells: [] };
     }
 
     return null;
@@ -185,21 +182,14 @@ function App() {
 
         const payload = JSON.parse(decoded);
 
-        if (Array.isArray(payload.board)) {
-          setBoard(payload.board);
-        }
-
+        if (Array.isArray(payload.board)) setBoard(payload.board);
         if (payload.currentTurn === "X" || payload.currentTurn === "O") {
           setCurrentTurn(payload.currentTurn);
         }
-
-        if (typeof payload.winner === "string") {
-          setWinner(payload.winner);
-        }
-
-        if (typeof payload.started === "boolean") {
-          setStarted(payload.started);
-        }
+        if (typeof payload.winner === "string") setWinner(payload.winner);
+        if (typeof payload.started === "boolean") setStarted(payload.started);
+        if (typeof payload.isDraw === "boolean") setIsDraw(payload.isDraw);
+        if (Array.isArray(payload.winningCells)) setWinningCells(payload.winningCells);
       } catch (err) {
         console.error("Failed to parse match data:", err);
       }
@@ -256,16 +246,18 @@ function App() {
       const deviceId = getDeviceId();
       const safeName = sanitizeUsername(username);
 
-      const authSession = await client.authenticateDevice(
-        deviceId,
-        true,
-        safeName
-      );
+      const authSession = await client.authenticateDevice(deviceId, true);
 
       setSession(authSession);
       setUserId(authSession.user_id || "");
 
-      await updateUsernameIfNeeded(authSession, safeName);
+      try {
+        await client.updateAccount(authSession, { username: safeName });
+      } catch (err) {
+        console.warn("Username update skipped/failed:", err);
+      }
+
+      await syncAccountInfo(authSession);
       await connectSocket(authSession);
 
       setStatus("success");
@@ -278,7 +270,7 @@ function App() {
     }
   };
 
-  const handleCreateMatch = async (): Promise<void> => {
+  const handleCreateGame = async (): Promise<void> => {
     try {
       const socket = socketRef.current;
       if (!socket) {
@@ -286,51 +278,19 @@ function App() {
         return;
       }
 
-      const result = await (socket as any).createMatch();
-      const createdId = result?.match_id || result?.matchId || result?.id || "";
-
-      setMatchId(createdId);
-      setMatchmakerTicket("");
-      resetBoard();
+      const match = await (socket as any).createMatch();
+      const createdMatchId = match?.match_id || match?.matchId || "";
+      setMatchId(createdMatchId);
       setStarted(true);
+      resetBoard();
       setPlayerSymbol("X");
-      setMessage("Game created successfully. You are X.");
+      setStatus("success");
+      setMessage(`Game created: ${createdMatchId}`);
     } catch (err: unknown) {
-      console.error("Create match error:", err);
+      console.error("Create game error:", err);
       const e = err as { message?: string };
       setStatus("error");
-      setMessage(e?.message || "Failed to create match.");
-    }
-  };
-
-  const handleJoinMatch = async (): Promise<void> => {
-    try {
-      const socket = socketRef.current;
-      if (!socket) {
-        setMessage("Please login first.");
-        return;
-      }
-
-      const id = joinMatchId.trim();
-      if (!id) {
-        setMessage("Enter a Match ID.");
-        return;
-      }
-
-      const result = await (socket as any).joinMatch(id);
-      const joinedId = result?.match_id || result?.matchId || result?.id || id;
-
-      setMatchmakerTicket("");
-      setMatchId(joinedId);
-      resetBoard();
-      setStarted(true);
-      setPlayerSymbol("O");
-      setMessage("Joined match successfully. You are O.");
-    } catch (err: unknown) {
-      console.error("Join match error:", err);
-      const e = err as { message?: string };
-      setStatus("error");
-      setMessage(e?.message || "Failed to join match.");
+      setMessage(e?.message || "Failed to create game.");
     }
   };
 
@@ -342,22 +302,15 @@ function App() {
         return;
       }
 
-      if (!socketConnected) {
-        setMessage("Socket is not connected.");
-        return;
-      }
-
       if (matchmakerTicket) {
         setMessage("Matchmaking is already in progress.");
         return;
       }
 
       const response = await (socket as any).addMatchmaker("*", 2, 2);
-      const ticket = response?.ticket || "";
-
-      setMatchmakerTicket(ticket);
+      setMatchmakerTicket(response.ticket);
       setStatus("loading");
-      setMessage("Finding a player... Open another client and search there too.");
+      setMessage("Finding a player...");
     } catch (err: unknown) {
       console.error("Matchmaker error:", err);
       const e = err as { message?: string };
@@ -369,15 +322,11 @@ function App() {
   const handleCancelMatchmaking = async (): Promise<void> => {
     try {
       const socket = socketRef.current;
-
-      if (!socket || !matchmakerTicket) {
-        setMessage("No active matchmaking ticket.");
-        return;
+      if (socket && matchmakerTicket) {
+        await (socket as any).removeMatchmaker(matchmakerTicket);
       }
-
-      await (socket as any).removeMatchmaker(matchmakerTicket);
       setMatchmakerTicket("");
-      setStatus("success");
+      setStatus("idle");
       setMessage("Matchmaking cancelled.");
     } catch (err: unknown) {
       console.error("Cancel matchmaking error:", err);
@@ -387,66 +336,82 @@ function App() {
     }
   };
 
-  const handleResetDevice = async (): Promise<void> => {
-    localStorage.removeItem("nakama-device-id");
-    await disconnectSocket();
-    setSession(null);
-    setUserId("");
-    setFinalUsername("");
-    setMatchId("");
-    setJoinMatchId("");
-    setStarted(false);
-    setPlayerSymbol("X");
-    resetBoard();
-    setStatus("idle");
-    setMessage("Device reset complete.");
+  const handleJoinGame = async (): Promise<void> => {
+    try {
+      const socket = socketRef.current;
+      if (!socket) {
+        setMessage("Please login first.");
+        return;
+      }
+
+      if (!joinMatchId.trim()) {
+        setMessage("Enter a valid match ID.");
+        return;
+      }
+
+      const joined = await (socket as any).joinMatch(joinMatchId.trim());
+      setMatchId(joined?.match_id || joinMatchId.trim());
+      resetBoard();
+      setStarted(true);
+      setPlayerSymbol("O");
+      setMessage("Joined game successfully.");
+      setStatus("success");
+    } catch (err: unknown) {
+      console.error("Join game error:", err);
+      const e = err as { message?: string };
+      setStatus("error");
+      setMessage(e?.message || "Failed to join game.");
+    }
   };
 
-  const handleCellClick = (index: number): void => {
-    if (!started) {
-      setMessage("Start or join a game first.");
-      return;
+  const sendMoveToServer = async (index: number, symbol: "X" | "O") => {
+    const socket = socketRef.current;
+    if (!socket || !matchId) return;
+
+    const payload = JSON.stringify({
+      type: "move",
+      index,
+      symbol,
+      board,
+      currentTurn,
+      started: true,
+    });
+
+    try {
+      await (socket as any).sendMatchState(matchId, payload);
+    } catch (err) {
+      console.error("Failed to send move:", err);
+    }
+  };
+
+  const handleCellClick = async (index: number): Promise<void> => {
+    if (!started || winner || isDraw) return;
+    if (board[index] !== "") return;
+
+    const newBoard = [...board];
+    newBoard[index] = currentTurn;
+
+    const result = checkWinner(newBoard);
+
+    setBoard(newBoard);
+
+    if (result?.winner === "X" || result?.winner === "O") {
+      setWinner(result.winner);
+      setWinningCells(result.winningCells);
+      setMessage(`Winner: ${result.winner}`);
+      setStatus("success");
+      setStarted(false);
+    } else if (result?.winner === "Draw") {
+      setIsDraw(true);
+      setMessage("Match drawn.");
+      setStatus("success");
+      setStarted(false);
+    } else {
+      setCurrentTurn((prev) => (prev === "X" ? "O" : "X"));
+      setMessage(`Current turn: ${currentTurn === "X" ? "O" : "X"}`);
     }
 
-    if (winner || isDraw) {
-      setMessage("Game is already finished.");
-      return;
-    }
-
-    if (board[index] !== "") {
-      setMessage("This cell is already filled.");
-      return;
-    }
-
-    if (currentTurn !== playerSymbol) {
-      setMessage(`It's ${currentTurn}'s turn.`);
-      return;
-    }
-
-    const updatedBoard = [...board];
-    updatedBoard[index] = currentTurn;
-
-    const result = checkWinner(updatedBoard);
-
-    setBoard(updatedBoard);
-
-    if (result) {
-      if (result.winner === "Draw") {
-        setIsDraw(true);
-        setWinner("");
-        setWinningCells([]);
-        setMessage("It's a draw!");
-      } else {
-        setWinner(result.winner);
-        setWinningCells(result.winningCells);
-        setMessage(`Winner is ${result.winner}!`);
-      }
-      return;
-    }
-
-    const nextTurn = currentTurn === "X" ? "O" : "X";
-    setCurrentTurn(nextTurn);
-    setMessage(`Turn changed to ${nextTurn}.`);
+    await sendMoveToServer(index, currentTurn);
   };
 
   useEffect(() => {
@@ -455,620 +420,72 @@ function App() {
     };
   }, []);
 
-  const statusColor =
-    status === "success"
-      ? "#15803d"
-      : status === "error"
-      ? "#b91c1c"
-      : status === "loading"
-      ? "#b45309"
-      : "#475569";
-
-  const statusBg =
-    status === "success"
-      ? "#dcfce7"
-      : status === "error"
-      ? "#fee2e2"
-      : status === "loading"
-      ? "#ffedd5"
-      : "#f8fafc";
-
   return (
-    <div
-      style={{
-        minHeight: "100vh",
-        background:
-          "radial-gradient(circle at top left, #dbeafe 0%, #f8fafc 35%, #eef2ff 100%)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: "24px",
-        fontFamily:
-          "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
-      }}
-    >
+    <div style={{ padding: 24, fontFamily: "Arial, sans-serif" }}>
+      <h1>Assignment Submission UI</h1>
+
+      <div style={{ marginBottom: 16 }}>
+        <label>Username</label>
+        <input
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          style={{ display: "block", width: "100%", marginTop: 8, padding: 12 }}
+        />
+      </div>
+
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+        <button onClick={handleLogin}>Login</button>
+        <button onClick={handleCreateGame}>Create Game</button>
+        <button onClick={handleFindPlayer}>Find Player</button>
+        <button onClick={handleCancelMatchmaking}>Cancel Matchmaking</button>
+      </div>
+
+      <div style={{ marginTop: 16 }}>
+        <label>Join Match ID</label>
+        <input
+          value={joinMatchId}
+          onChange={(e) => setJoinMatchId(e.target.value)}
+          style={{ display: "block", width: "100%", marginTop: 8, padding: 12 }}
+        />
+        <button onClick={handleJoinGame} style={{ marginTop: 12 }}>
+          Join Game
+        </button>
+      </div>
+
+      <div style={{ marginTop: 16 }}>
+        <p>Status: {status}</p>
+        <p>{message}</p>
+        <p>User ID: {userId}</p>
+        <p>Username: {finalUsername || username}</p>
+        <p>Socket: {socketConnected ? "Connected" : "Disconnected"}</p>
+        <p>Match ID: {matchId || "-"}</p>
+        <p>Matchmaker Ticket: {matchmakerTicket || "-"}</p>
+        <p>Current Turn: {currentTurn}</p>
+        <p>Winner: {winner || "-"}</p>
+        <p>Draw: {isDraw ? "Yes" : "No"}</p>
+      </div>
+
       <div
         style={{
-          width: "100%",
-          maxWidth: "1180px",
           display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(340px, 1fr))",
-          gap: "24px",
-          alignItems: "start",
+          gridTemplateColumns: "repeat(3, 100px)",
+          gap: 10,
+          marginTop: 24,
         }}
       >
-        <div
-          style={{
-            background: "#ffffff",
-            borderRadius: "24px",
-            padding: "32px",
-            border: "1px solid #e2e8f0",
-            boxShadow: "0 18px 50px rgba(15, 23, 42, 0.08)",
-          }}
-        >
-          <div style={{ marginBottom: "28px" }}>
-            <div
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                padding: "8px 14px",
-                borderRadius: "999px",
-                background: "#eff6ff",
-                color: "#1d4ed8",
-                fontSize: "13px",
-                fontWeight: 700,
-                marginBottom: "16px",
-              }}
-            >
-              Tic Tac Toe • Nakama
-            </div>
-
-            <h1
-              style={{
-                margin: 0,
-                fontSize: "34px",
-                lineHeight: 1.15,
-                color: "#0f172a",
-              }}
-            >
-              Assignment Submission UI
-            </h1>
-
-            <p
-              style={{
-                margin: "12px 0 0 0",
-                color: "#475569",
-                fontSize: "16px",
-                lineHeight: 1.7,
-              }}
-            >
-              Login, create a game, join by match ID, or find a player using Nakama matchmaking.
-            </p>
-          </div>
-
-          <div style={{ marginBottom: "18px" }}>
-            <label
-              htmlFor="username"
-              style={{
-                display: "block",
-                marginBottom: "8px",
-                fontSize: "14px",
-                fontWeight: 700,
-                color: "#0f172a",
-              }}
-            >
-              Username
-            </label>
-
-            <input
-              id="username"
-              type="text"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              placeholder="Enter username"
-              style={{
-                width: "100%",
-                padding: "14px 16px",
-                borderRadius: "14px",
-                border: "1px solid #cbd5e1",
-                background: "#fff",
-                color: "#0f172a",
-                outline: "none",
-                fontSize: "15px",
-              }}
-            />
-          </div>
-
-          <div
-            style={{
-              display: "flex",
-              gap: "12px",
-              flexWrap: "wrap",
-              marginBottom: "22px",
-            }}
-          >
-            <button
-              onClick={handleLogin}
-              disabled={status === "loading"}
-              style={{
-                padding: "14px 20px",
-                borderRadius: "14px",
-                border: "none",
-                background: status === "loading" ? "#94a3b8" : "#2563eb",
-                color: "#fff",
-                fontWeight: 700,
-                fontSize: "15px",
-                cursor: status === "loading" ? "not-allowed" : "pointer",
-                minWidth: "140px",
-              }}
-            >
-              {status === "loading" ? "Connecting..." : "Login"}
-            </button>
-
-            <button
-              onClick={handleResetDevice}
-              style={{
-                padding: "14px 20px",
-                borderRadius: "14px",
-                border: "1px solid #cbd5e1",
-                background: "#fff",
-                color: "#0f172a",
-                fontWeight: 700,
-                fontSize: "15px",
-                cursor: "pointer",
-                minWidth: "140px",
-              }}
-            >
-              Reset Device
-            </button>
-          </div>
-
-          <div
-            style={{
-              background: statusBg,
-              borderRadius: "18px",
-              padding: "18px",
-              border: `1px solid ${statusColor}22`,
-              marginBottom: "20px",
-            }}
-          >
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: "10px",
-                marginBottom: "8px",
-              }}
-            >
-              <span
-                style={{
-                  width: "10px",
-                  height: "10px",
-                  borderRadius: "999px",
-                  background: statusColor,
-                  display: "inline-block",
-                }}
-              />
-              <strong style={{ color: statusColor, fontSize: "14px" }}>
-                Status: {status}
-              </strong>
-            </div>
-
-            <p
-              style={{
-                margin: 0,
-                fontSize: "15px",
-                lineHeight: 1.6,
-                color: "#334155",
-              }}
-            >
-              {message}
-            </p>
-          </div>
-
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
-              gap: "14px",
-              marginBottom: "22px",
-            }}
-          >
-            <div
-              style={{
-                background: "#f8fafc",
-                borderRadius: "18px",
-                padding: "16px",
-                border: "1px solid #e2e8f0",
-              }}
-            >
-              <p style={{ margin: 0, color: "#64748b", fontSize: "13px" }}>
-                User ID
-              </p>
-              <p
-                style={{
-                  margin: "8px 0 0 0",
-                  color: "#0f172a",
-                  fontWeight: 700,
-                  fontSize: "14px",
-                  wordBreak: "break-word",
-                }}
-              >
-                {userId || "-"}
-              </p>
-            </div>
-
-            <div
-              style={{
-                background: "#f8fafc",
-                borderRadius: "18px",
-                padding: "16px",
-                border: "1px solid #e2e8f0",
-              }}
-            >
-              <p style={{ margin: 0, color: "#64748b", fontSize: "13px" }}>
-                Username
-              </p>
-              <p
-                style={{
-                  margin: "8px 0 0 0",
-                  color: "#0f172a",
-                  fontWeight: 700,
-                  fontSize: "14px",
-                  wordBreak: "break-word",
-                }}
-              >
-                {finalUsername || "-"}
-              </p>
-            </div>
-
-            <div
-              style={{
-                background: "#f8fafc",
-                borderRadius: "18px",
-                padding: "16px",
-                border: "1px solid #e2e8f0",
-              }}
-            >
-              <p style={{ margin: 0, color: "#64748b", fontSize: "13px" }}>
-                Socket
-              </p>
-              <p
-                style={{
-                  margin: "8px 0 0 0",
-                  color: "#0f172a",
-                  fontWeight: 700,
-                  fontSize: "14px",
-                }}
-              >
-                {socketConnected ? "Connected" : "Disconnected"}
-              </p>
-            </div>
-
-            <div
-              style={{
-                background: "#f8fafc",
-                borderRadius: "18px",
-                padding: "16px",
-                border: "1px solid #e2e8f0",
-              }}
-            >
-              <p style={{ margin: 0, color: "#64748b", fontSize: "13px" }}>
-                Your Symbol
-              </p>
-              <p
-                style={{
-                  margin: "8px 0 0 0",
-                  color: "#0f172a",
-                  fontWeight: 700,
-                  fontSize: "18px",
-                }}
-              >
-                {playerSymbol}
-              </p>
-            </div>
-          </div>
-
-          <hr
-            style={{
-              border: "none",
-              borderTop: "1px solid #e2e8f0",
-              margin: "22px 0",
-            }}
-          />
-
-          <h2 style={{ margin: "0 0 16px 0", fontSize: "24px", color: "#0f172a" }}>
-            Game Controls
-          </h2>
-
-          <div
-            style={{
-              display: "flex",
-              gap: "12px",
-              flexWrap: "wrap",
-              marginBottom: "14px",
-            }}
-          >
-            <button
-              onClick={handleCreateMatch}
-              style={{
-                padding: "14px 20px",
-                borderRadius: "16px",
-                border: "none",
-                background: "#0f766e",
-                color: "#fff",
-                fontWeight: 700,
-                fontSize: "15px",
-                cursor: "pointer",
-                minWidth: "140px",
-              }}
-            >
-              Create Game
-            </button>
-
-            <button
-              onClick={handleFindPlayer}
-              style={{
-                padding: "14px 20px",
-                borderRadius: "16px",
-                border: "none",
-                background: "#7c3aed",
-                color: "#fff",
-                fontWeight: 700,
-                fontSize: "15px",
-                cursor: "pointer",
-                minWidth: "140px",
-              }}
-            >
-              Find Player
-            </button>
-
-            <button
-              onClick={handleCancelMatchmaking}
-              style={{
-                padding: "14px 20px",
-                borderRadius: "16px",
-                border: "none",
-                background: "#dc2626",
-                color: "#fff",
-                fontWeight: 700,
-                fontSize: "15px",
-                cursor: "pointer",
-                minWidth: "160px",
-              }}
-            >
-              Cancel Matchmaking
-            </button>
-          </div>
-
-          <input
-            type="text"
-            value={joinMatchId}
-            onChange={(e) => setJoinMatchId(e.target.value)}
-            placeholder="Enter Match ID"
-            style={{
-              width: "100%",
-              padding: "14px 16px",
-              borderRadius: "14px",
-              border: "1px solid #cbd5e1",
-              background: "#fff",
-              color: "#0f172a",
-              outline: "none",
-              fontSize: "15px",
-              marginBottom: "14px",
-            }}
-          />
-
+        {board.map((cell, index) => (
           <button
-            onClick={handleJoinMatch}
+            key={index}
+            onClick={() => void handleCellClick(index)}
             style={{
-              padding: "14px 20px",
-              borderRadius: "16px",
-              border: "none",
-              background: "#ea580c",
-              color: "#fff",
+              height: 100,
+              fontSize: 32,
               fontWeight: 700,
-              fontSize: "15px",
-              cursor: "pointer",
-              minWidth: "140px",
-              marginBottom: "18px",
             }}
           >
-            Join Game
+            {cell}
           </button>
-
-          <div
-            style={{
-              background: "#f8fafc",
-              borderRadius: "18px",
-              padding: "18px",
-              border: "1px solid #e2e8f0",
-              marginBottom: "14px",
-            }}
-          >
-            <p style={{ margin: 0, color: "#64748b", fontSize: "13px" }}>
-              Current Match ID
-            </p>
-            <p
-              style={{
-                margin: "8px 0 0 0",
-                color: "#0f172a",
-                fontWeight: 700,
-                fontSize: "14px",
-                wordBreak: "break-word",
-              }}
-            >
-              {matchId || "-"}
-            </p>
-          </div>
-
-          <div
-            style={{
-              background: "#f8fafc",
-              borderRadius: "18px",
-              padding: "18px",
-              border: "1px solid #e2e8f0",
-            }}
-          >
-            <p style={{ margin: 0, color: "#64748b", fontSize: "13px" }}>
-              Matchmaker Ticket
-            </p>
-            <p
-              style={{
-                margin: "8px 0 0 0",
-                color: "#0f172a",
-                fontWeight: 700,
-                fontSize: "14px",
-                wordBreak: "break-word",
-              }}
-            >
-              {matchmakerTicket || "-"}
-            </p>
-          </div>
-        </div>
-
-        <div
-          style={{
-            background: "#0f172a",
-            borderRadius: "24px",
-            padding: "32px",
-            color: "#e2e8f0",
-            border: "1px solid #1e293b",
-            boxShadow: "0 18px 50px rgba(15, 23, 42, 0.2)",
-          }}
-        >
-          <h2 style={{ margin: "0 0 20px 0", fontSize: "28px", color: "#fff" }}>
-            Game Board
-          </h2>
-
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
-              gap: "14px",
-              marginBottom: "16px",
-            }}
-          >
-            <div
-              style={{
-                background: "#1e293b",
-                borderRadius: "18px",
-                padding: "16px",
-                border: "1px solid #334155",
-              }}
-            >
-              <p style={{ margin: 0, color: "#94a3b8", fontSize: "13px" }}>
-                Started
-              </p>
-              <p style={{ margin: "8px 0 0 0", color: "#fff", fontWeight: 700 }}>
-                {started ? "Yes" : "No"}
-              </p>
-            </div>
-
-            <div
-              style={{
-                background: "#1e293b",
-                borderRadius: "18px",
-                padding: "16px",
-                border: "1px solid #334155",
-              }}
-            >
-              <p style={{ margin: 0, color: "#94a3b8", fontSize: "13px" }}>
-                Current Turn
-              </p>
-              <p style={{ margin: "8px 0 0 0", color: "#fff", fontWeight: 700 }}>
-                {currentTurn}
-              </p>
-            </div>
-
-            <div
-              style={{
-                background: "#1e293b",
-                borderRadius: "18px",
-                padding: "16px",
-                border: "1px solid #334155",
-              }}
-            >
-              <p style={{ margin: 0, color: "#94a3b8", fontSize: "13px" }}>
-                Winner
-              </p>
-              <p style={{ margin: "8px 0 0 0", color: "#fff", fontWeight: 700 }}>
-                {winner || (isDraw ? "Draw" : "-")}
-              </p>
-            </div>
-          </div>
-
-          <div
-            style={{
-              background: winner
-                ? "#14532d"
-                : isDraw
-                ? "#78350f"
-                : "#1e293b",
-              borderRadius: "18px",
-              padding: "16px",
-              border: "1px solid #334155",
-              marginBottom: "18px",
-            }}
-          >
-            <p style={{ margin: 0, color: "#fff", fontWeight: 700 }}>
-              {winner
-                ? `Winner is ${winner}`
-                : isDraw
-                ? "Match Draw"
-                : started
-                ? `Game in progress - ${currentTurn}'s turn`
-                : "Waiting to start"}
-            </p>
-          </div>
-
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
-              gap: "12px",
-            }}
-          >
-            {board.map((cell, index) => {
-              const isWinningCell = winningCells.includes(index);
-
-              return (
-                <button
-                  key={index}
-                  onClick={() => handleCellClick(index)}
-                  disabled={!started || !!winner || isDraw || cell !== ""}
-                  style={{
-                    aspectRatio: "1 / 1",
-                    borderRadius: "18px",
-                    border: isWinningCell
-                      ? "2px solid #22c55e"
-                      : "1px solid #334155",
-                    background: isWinningCell ? "#14532d" : "#1e293b",
-                    color:
-                      cell === "X"
-                        ? "#60a5fa"
-                        : cell === "O"
-                        ? "#f59e0b"
-                        : "#fff",
-                    fontSize: "48px",
-                    fontWeight: 800,
-                    cursor:
-                      !started || !!winner || isDraw || cell !== ""
-                        ? "not-allowed"
-                        : "pointer",
-                    opacity:
-                      !started || (!!winner && !isWinningCell) || isDraw
-                        ? 0.95
-                        : 1,
-                    transition: "all 0.2s ease",
-                  }}
-                >
-                  {cell}
-                </button>
-              );
-            })}
-          </div>
-        </div>
+        ))}
       </div>
     </div>
   );
