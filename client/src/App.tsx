@@ -1,435 +1,385 @@
-import React, { useMemo, useRef, useState } from "react";
-import { Client, Session, Socket } from "@heroiclabs/nakama-js";
+import React, { useEffect, useState, useCallback, useRef } from 'react';
+import {
+  Client,
+  Session,
+  Socket,
+  MatchData,
+  MatchPresenceEvent,
+} from '@heroiclabs/nakama-js';
+import confetti from 'canvas-confetti';
+import './App.css';
 
-type StatusType = "idle" | "authenticating" | "connecting" | "ready" | "joined" | "error";
+interface GameState {
+  board: (string | null)[];
+  currentPlayer: string;
+  players: Record<string, string>;
+  usernames: Record<string, string>;
+  winner: string | null;
+  gameOver: boolean;
+  moveCount: number;
+  started: boolean;
+}
 
-const SERVER_KEY = "defaultkey";
-const HOST = process.env.REACT_APP_NAKAMA_HOST || "your-render-service.onrender.com";
-const PORT = process.env.REACT_APP_NAKAMA_PORT || "443";
-const USE_SSL = String(process.env.REACT_APP_NAKAMA_SSL || "true") === "true";
+interface MatchInfo {
+  match_id: string;
+}
 
-const OpCode = {
-  START: 1,
-  MOVE: 2,
-  STATE: 3,
-  ERROR: 4,
-} as const;
-
-function App() {
-  const client = useMemo(() => new Client(SERVER_KEY, HOST, PORT, USE_SSL), []);
+const App: React.FC = () => {
+  const [client, setClient] = useState<Client | null>(null);
+  const [session, setSession] = useState<Session | null>(null);
   const socketRef = useRef<Socket | null>(null);
 
-  const [username, setUsername] = useState("jafer");
-  const [session, setSession] = useState<Session | null>(null);
-  const [status, setStatus] = useState<StatusType>("idle");
-  const [message, setMessage] = useState("Login, create a match, and share the match ID with another player.");
-  const [socketConnected, setSocketConnected] = useState(false);
-  const [userId, setUserId] = useState("");
-  const [matchId, setMatchId] = useState("");
-  const [joinMatchId, setJoinMatchId] = useState("");
-  const [board, setBoard] = useState<string[]>(["", "", "", "", "", "", "", "", ""]);
-  const [currentTurn, setCurrentTurn] = useState<"X" | "O">("X");
-  const [winner, setWinner] = useState<string | null>(null);
-  const [myMark, setMyMark] = useState<"X" | "O" | "">("");
-  const [playerX, setPlayerX] = useState("");
-  const [playerO, setPlayerO] = useState("");
+  const [username, setUsername] = useState('');
+  const [myUserId, setMyUserId] = useState('');
+  const [match, setMatch] = useState<MatchInfo | null>(null);
+  const [gameState, setGameState] = useState<GameState | null>(null);
 
-  const getDeviceId = () => {
-    const existing = localStorage.getItem("nakama-device-id");
-    if (existing) return existing;
+  const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState('');
 
-    const newId =
-      typeof crypto !== "undefined" && "randomUUID" in crypto
-        ? crypto.randomUUID()
-        : `device-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+  const host =
+    process.env.REACT_APP_NAKAMA_HOST || 'tic-tac-toe-nakama-1-osku.onrender.com';
 
-    localStorage.setItem("nakama-device-id", newId);
-    return newId;
-  };
+  const port = process.env.REACT_APP_NAKAMA_PORT || '443';
 
-  const sanitizeUsername = (value: string) => {
-    const cleaned = value
-      .trim()
-      .replace(/\s+/g, "_")
-      .replace(/[^a-zA-Z0-9_]/g, "");
+  const useSSL =
+    process.env.REACT_APP_NAKAMA_SSL
+      ? process.env.REACT_APP_NAKAMA_SSL === 'true'
+      : true;
 
-    return cleaned || `player_${Math.random().toString(36).slice(2, 8)}`;
-  };
+  useEffect(() => {
+    const nakamaClient = new Client('defaultkey', host, port, useSSL);
+    setClient(nakamaClient);
+    setStatus(`Server ready: ${useSSL ? 'wss' : 'ws'}://${host}:${port}`);
+  }, [host, port, useSSL]);
 
-  const resetBoardState = () => {
-    setBoard(["", "", "", "", "", "", "", "", ""]);
-    setCurrentTurn("X");
-    setWinner(null);
-    setMyMark("");
-    setPlayerX("");
-    setPlayerO("");
-  };
+  useEffect(() => {
+    const socket = socketRef.current;
+    if (!socket) return;
 
-  const setupSocketHandlers = (socket: Socket) => {
-    socket.ondisconnect = () => {
-      setSocketConnected(false);
-      setStatus("error");
-      setMessage("Socket disconnected.");
-    };
-
-    socket.onmatchdata = (data: any) => {
+    const handleMatchData = (matchData: MatchData) => {
       try {
-        const text =
-          typeof data.data === "string"
-            ? data.data
-            : new TextDecoder().decode(data.data);
+        const decoded = new TextDecoder().decode(matchData.data);
+        const data = JSON.parse(decoded);
 
-        const payload = JSON.parse(text);
+        if (matchData.op_code === 4) {
+          setError(data?.error || 'Match error');
+          return;
+        }
 
-        if (data.op_code === OpCode.START) {
-          setBoard(payload.board || ["", "", "", "", "", "", "", "", ""]);
-          setCurrentTurn(payload.currentTurn || "X");
-          setPlayerX(payload.playerX || "");
-          setPlayerO(payload.playerO || "");
-          setMessage("Match started.");
+        const nextState: GameState = data;
+        setGameState(nextState);
 
-          if (payload.playerX === username) {
-            setMyMark("X");
-          } else if (payload.playerO === username) {
-            setMyMark("O");
+        const playerCount = Object.keys(nextState.players || {}).length;
+
+        if (playerCount < 2 || !nextState.started) {
+          setStatus('Waiting for opponent to join...');
+          return;
+        }
+
+        if (nextState.gameOver) {
+          if (nextState.winner) {
+            if (nextState.winner === myUserId) {
+              setStatus('🎉 You won!');
+              confetti({
+                particleCount: 120,
+                spread: 70,
+                origin: { y: 0.6 },
+              });
+            } else {
+              setStatus('😢 You lost!');
+            }
+          } else {
+            setStatus('🤝 Match draw!');
           }
+        } else if (nextState.currentPlayer === myUserId) {
+          setStatus('Your turn');
+        } else {
+          setStatus("Opponent's turn");
         }
-
-        if (data.op_code === OpCode.STATE) {
-          setBoard(payload.board || ["", "", "", "", "", "", "", "", ""]);
-          setCurrentTurn(payload.currentTurn || "X");
-          setWinner(payload.winner || null);
-          setPlayerX(payload.playerX || "");
-          setPlayerO(payload.playerO || "");
-
-          if (payload.playerX === username) {
-            setMyMark("X");
-          } else if (payload.playerO === username) {
-            setMyMark("O");
-          }
-        }
-
-        if (data.op_code === OpCode.ERROR) {
-          setMessage(payload.message || "Match error.");
-        }
-      } catch {
-        setMessage("Received invalid match data.");
+      } catch (err) {
+        console.error('Match data parse error:', err);
       }
     };
-  };
 
-  const handleLogin = async () => {
+    const handleMatchPresence = (presenceEvent: MatchPresenceEvent) => {
+      const joins = presenceEvent.joins?.length || 0;
+      const leaves = presenceEvent.leaves?.length || 0;
+
+      if (joins > 0) {
+        setStatus('Opponent joined! Starting game...');
+      } else if (leaves > 0) {
+        setStatus('Opponent left the match');
+      }
+    };
+
+    socket.onmatchdata = handleMatchData;
+    socket.onmatchpresence = handleMatchPresence;
+
+    return () => {
+      socket.onmatchdata = (_matchData: MatchData) => {};
+      socket.onmatchpresence = (_presenceEvent: MatchPresenceEvent) => {};
+    };
+  }, [myUserId]);
+
+  const getDeviceId = useCallback(() => {
+    const key = 'nakama-device-id';
+    let id = localStorage.getItem(key);
+
+    if (!id) {
+      id =
+        typeof crypto !== 'undefined' && 'randomUUID' in crypto
+          ? crypto.randomUUID()
+          : `device-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      localStorage.setItem(key, id);
+    }
+
+    return id;
+  }, []);
+
+  const connectToNakama = async () => {
+    if (!client || !username.trim()) {
+      setError('Please enter a username');
+      return;
+    }
+
     try {
-      setStatus("authenticating");
-      setMessage("Authenticating...");
+      setError(null);
+      setStatus('Authenticating...');
 
       const deviceId = getDeviceId();
-      const safeUsername = sanitizeUsername(username);
+      const cleanUsername = username.trim().replace(/\s+/g, '_');
 
-      const authSession = await client.authenticateDevice(
+      const newSession = await client.authenticateDevice(
         deviceId,
         true,
-        safeUsername
+        cleanUsername
       );
 
-      setSession(authSession);
+      setSession(newSession);
 
       const resolvedUserId =
-        (authSession as any).userId ||
-        (authSession as any).user_id ||
-        (authSession as any).sub ||
-        "";
+        (newSession as any).userId ||
+        (newSession as any).user_id ||
+        (newSession as any).id ||
+        '';
 
-      setUserId(resolvedUserId);
+      setMyUserId(resolvedUserId);
+      setStatus('Connected successfully');
 
-      setStatus("connecting");
-      setMessage("Connecting socket...");
+      if (socketRef.current) {
+        socketRef.current.disconnect(false);
+      }
 
-      const socket = client.createSocket(USE_SSL, false);
-      setupSocketHandlers(socket);
-
-      await socket.connect(authSession, true);
-      socketRef.current = socket;
-
-      setSocketConnected(true);
-      setStatus("ready");
-      setMessage("Login successful. You can now create or join a match.");
-    } catch (error: any) {
-      setStatus("error");
-      setMessage(error?.message || "Login failed.");
+      const newSocket = client.createSocket(useSSL, false);
+      await newSocket.connect(newSession, true);
+      socketRef.current = newSocket;
+    } catch (err: any) {
+      console.error('Auth error:', err);
+      const message = err?.message || 'Connection failed';
+      setError(`Connection failed: ${message}`);
+      setStatus('');
     }
   };
 
-  const handleCreateMatch = async () => {
+  const findMatch = async () => {
+    if (!client || !session || !socketRef.current) {
+      setError('Not connected properly');
+      return;
+    }
+
     try {
-      if (!socketRef.current) {
-        setMessage("Please login first.");
-        return;
+      setError(null);
+      setGameState(null);
+      setStatus('Searching for opponent...');
+
+      const rpc: any = await client.rpc(session, 'find_match', {});
+      console.log('Raw RPC response:', rpc);
+
+      let parsed: any = {};
+
+      if (typeof rpc?.payload === 'string') {
+        console.log('Raw RPC payload string:', rpc.payload);
+        parsed = JSON.parse(rpc.payload || '{}');
+      } else if (rpc?.payload && typeof rpc.payload === 'object') {
+        console.log('Raw RPC payload object:', rpc.payload);
+        parsed = rpc.payload;
+      } else {
+        console.log('RPC payload missing, checking root object');
+        parsed = rpc || {};
       }
 
-      resetBoardState();
-      setMessage("Creating match...");
+      console.log('Parsed RPC payload:', parsed);
 
-      const response = await socketRef.current.createMatch();
-      setMatchId(response.match_id);
-      setJoinMatchId(response.match_id);
-      setStatus("joined");
-      setMessage("Match created. Share this Match ID with player 2.");
-    } catch (error: any) {
-      setStatus("error");
-      setMessage(error?.message || "Failed to create match.");
+      const matchId = parsed.matchId || parsed.match_id;
+
+      if (!matchId) {
+        throw new Error('No valid match ID returned from RPC');
+      }
+
+      const joined = await socketRef.current.joinMatch(String(matchId));
+      setMatch({ match_id: joined.match_id });
+      setStatus('Joined match. Waiting for opponent...');
+    } catch (err: any) {
+      console.error('Matchmaking error:', err);
+      setError(`Matchmaking failed: ${err?.message || 'Unknown error'}`);
     }
   };
 
-  const handleJoinMatch = async () => {
+  const makeMove = async (pos: number) => {
+    if (!socketRef.current || !match || !gameState) return;
+    if (!gameState.started) return;
+    if (gameState.gameOver) return;
+    if (gameState.currentPlayer !== myUserId) return;
+    if (gameState.board[pos]) return;
+
     try {
-      if (!socketRef.current) {
-        setMessage("Please login first.");
-        return;
-      }
-
-      if (!joinMatchId.trim()) {
-        setMessage("Enter a valid Match ID.");
-        return;
-      }
-
-      resetBoardState();
-      setMessage("Joining match...");
-
-      const response = await socketRef.current.joinMatch(joinMatchId.trim());
-      setMatchId(response.match_id);
-      setStatus("joined");
-      setMessage("Joined match successfully.");
-
-      const usernames = response.presences.map((p: any) => p.username);
-      if (usernames.length > 0) setPlayerX(usernames[0] || "");
-      if (usernames.length > 1) setPlayerO(usernames[1] || "");
-
-      if (response.self.username === usernames[0]) {
-        setMyMark("X");
-      } else if (response.self.username === usernames[1]) {
-        setMyMark("O");
-      }
-    } catch (error: any) {
-      setStatus("error");
-      setMessage(error?.message || "Failed to join match.");
-    }
-  };
-
-  const handleMove = async (index: number) => {
-    try {
-      if (!socketRef.current || !matchId) {
-        setMessage("Join a match first.");
-        return;
-      }
-
-      if (winner) {
-        setMessage("Game already finished.");
-        return;
-      }
-
-      if (board[index] !== "") {
-        return;
-      }
-
-      if (!myMark) {
-        setMessage("Waiting for your player mark.");
-        return;
-      }
-
-      if (myMark !== currentTurn) {
-        setMessage("It is not your turn.");
-        return;
-      }
-
       await socketRef.current.sendMatchState(
-        matchId,
-        OpCode.MOVE,
-        JSON.stringify({ index })
+        match.match_id,
+        2,
+        JSON.stringify({ position: pos })
       );
-    } catch (error: any) {
-      setMessage(error?.message || "Failed to send move.");
+    } catch (err: any) {
+      console.error('Move failed:', err);
+      setError(`Move failed: ${err?.message || 'Unknown error'}`);
     }
   };
 
-  const handleResetDevice = () => {
-    localStorage.removeItem("nakama-device-id");
-    socketRef.current = null;
-    setSession(null);
-    setStatus("idle");
-    setMessage("Device reset. Login again.");
-    setSocketConnected(false);
-    setUserId("");
-    setMatchId("");
-    setJoinMatchId("");
-    resetBoardState();
+  const restartGame = async () => {
+    if (!socketRef.current || !match || !gameState?.gameOver) return;
+
+    try {
+      await socketRef.current.sendMatchState(match.match_id, 3, '{}');
+      setError(null);
+    } catch (err: any) {
+      console.error('Restart failed:', err);
+      setError(`Restart failed: ${err?.message || 'Unknown error'}`);
+    }
   };
+
+  const leaveMatch = () => {
+    setMatch(null);
+    setGameState(null);
+    setError(null);
+    setStatus('Ready to find a new match');
+  };
+
+  useEffect(() => {
+    return () => {
+      if (socketRef.current) {
+        socketRef.current.disconnect(false);
+      }
+    };
+  }, []);
+
+  const mySymbol =
+    gameState && myUserId ? gameState.players?.[myUserId] || '-' : '-';
+
+  const opponentEntry =
+    gameState
+      ? Object.entries(gameState.usernames || {}).find(([id]) => id !== myUserId)
+      : undefined;
+
+  const opponentName = opponentEntry?.[1] || 'Waiting...';
 
   return (
-    <div style={styles.page}>
-      <div style={styles.card}>
-        <h1 style={styles.title}>Tic Tac Toe</h1>
-        <p style={styles.subtitle}>React + Nakama Authoritative Match</p>
-
-        <label style={styles.label}>Username</label>
-        <input
-          style={styles.input}
-          value={username}
-          onChange={(e) => setUsername(e.target.value)}
-          placeholder="Enter username"
-        />
-
-        <div style={styles.actions}>
-          <button style={styles.primaryBtn} onClick={handleLogin}>
-            Login
-          </button>
-          <button style={styles.secondaryBtn} onClick={handleCreateMatch}>
-            Create Match
-          </button>
-          <button style={styles.secondaryBtn} onClick={handleResetDevice}>
-            Reset Device
-          </button>
+    <div className="app">
+      <div className="header">
+        <h1>🎮 Tic-Tac-Toe</h1>
+        <div className="connection-info">
+          <span className="server-badge">
+            Server: {useSSL ? 'wss' : 'ws'}://{host}:{port}
+          </span>
         </div>
+      </div>
 
-        <label style={styles.label}>Join with Match ID</label>
-        <div style={styles.joinRow}>
-          <input
-            style={styles.input}
-            value={joinMatchId}
-            onChange={(e) => setJoinMatchId(e.target.value)}
-            placeholder="Paste match ID here"
-          />
-          <button style={styles.primaryBtn} onClick={handleJoinMatch}>
-            Join Match
-          </button>
-        </div>
+      {error && <div className="error-banner">{error}</div>}
 
-        <div style={styles.statusBox}>
-          <p><strong>Status:</strong> {status}</p>
-          <p><strong>Message:</strong> {message}</p>
-          <p><strong>Socket:</strong> {socketConnected ? "Connected" : "Disconnected"}</p>
-          <p><strong>User ID:</strong> {userId || "-"}</p>
-          <p><strong>Match ID:</strong> {matchId || "-"}</p>
-          <p><strong>Your Mark:</strong> {myMark || "-"}</p>
-          <p><strong>Current Turn:</strong> {currentTurn}</p>
-          <p><strong>Winner:</strong> {winner || "-"}</p>
-          <p><strong>Player X:</strong> {playerX || "-"}</p>
-          <p><strong>Player O:</strong> {playerO || "-"}</p>
-        </div>
+      <div className="main-content">
+        {status && <div className="status">{status}</div>}
 
-        <div style={styles.board}>
-          {board.map((cell, index) => (
-            <button
-              key={index}
-              style={styles.cell}
-              onClick={() => handleMove(index)}
-            >
-              {cell}
+        {!session ? (
+          <div className="login-screen">
+            <h2>Join the Game</h2>
+            <p className="subtitle">Enter your name to connect</p>
+            <input
+              className="username-input"
+              placeholder="Enter name"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+            />
+            <button className="connect-btn" onClick={connectToNakama}>
+              Connect
             </button>
-          ))}
-        </div>
+          </div>
+        ) : !match ? (
+          <div className="matchmaking-screen">
+            <h2>Welcome, {username}</h2>
+            <p className="subtitle">You are connected. Find a player to start.</p>
+            <button className="find-match-btn" onClick={findMatch}>
+              Find Match
+            </button>
+          </div>
+        ) : (
+          <div className="game-screen">
+            <h2>Match in Progress</h2>
+
+            <div className="players">
+              <div className="player me">
+                <span className="symbol">You ({mySymbol})</span>
+                <span className="name">{username}</span>
+              </div>
+
+              <div className="player opponent">
+                <span className="symbol">Opponent</span>
+                <span className="name">{opponentName}</span>
+              </div>
+            </div>
+
+            {!gameState || !gameState.started ? (
+              <div className="waiting-box">Waiting for second player to join...</div>
+            ) : (
+              <div className="game-board">
+                {gameState.board.map((cell, i) => {
+                  const clickable =
+                    !cell &&
+                    !gameState.gameOver &&
+                    gameState.currentPlayer === myUserId;
+
+                  return (
+                    <button
+                      key={i}
+                      className={`cell ${cell ? 'filled' : ''} ${clickable ? 'active' : ''}`}
+                      onClick={() => makeMove(i)}
+                      disabled={!clickable}
+                    >
+                      {cell}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            <div className="game-controls">
+              {gameState?.gameOver && (
+                <button className="restart-btn" onClick={restartGame}>
+                  Play Again
+                </button>
+              )}
+
+              <button className="leave-match-btn" onClick={leaveMatch}>
+                Leave Match
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="footer">
+        <p>Multiplayer Tic-Tac-Toe with Nakama</p>
       </div>
     </div>
   );
-}
-
-const styles: Record<string, React.CSSProperties> = {
-  page: {
-    minHeight: "100vh",
-    background: "#0f172a",
-    color: "#e2e8f0",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: "24px",
-    fontFamily: "Arial, sans-serif",
-  },
-  card: {
-    width: "100%",
-    maxWidth: "700px",
-    background: "#1e293b",
-    borderRadius: "16px",
-    padding: "24px",
-    boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
-  },
-  title: {
-    margin: 0,
-    fontSize: "32px",
-  },
-  subtitle: {
-    marginTop: "8px",
-    marginBottom: "20px",
-    color: "#94a3b8",
-  },
-  label: {
-    display: "block",
-    marginBottom: "8px",
-    fontWeight: 700,
-  },
-  input: {
-    width: "100%",
-    padding: "12px 14px",
-    borderRadius: "10px",
-    border: "1px solid #334155",
-    background: "#0f172a",
-    color: "#e2e8f0",
-    marginBottom: "16px",
-  },
-  actions: {
-    display: "flex",
-    gap: "12px",
-    flexWrap: "wrap",
-    marginBottom: "16px",
-  },
-  joinRow: {
-    display: "flex",
-    gap: "12px",
-    flexWrap: "wrap",
-    alignItems: "center",
-  },
-  primaryBtn: {
-    padding: "12px 18px",
-    borderRadius: "10px",
-    border: "none",
-    background: "#2563eb",
-    color: "white",
-    cursor: "pointer",
-    fontWeight: 700,
-  },
-  secondaryBtn: {
-    padding: "12px 18px",
-    borderRadius: "10px",
-    border: "1px solid #475569",
-    background: "transparent",
-    color: "#e2e8f0",
-    cursor: "pointer",
-    fontWeight: 700,
-  },
-  statusBox: {
-    marginTop: "20px",
-    marginBottom: "20px",
-    padding: "16px",
-    borderRadius: "12px",
-    background: "#0f172a",
-    border: "1px solid #334155",
-    lineHeight: 1.8,
-  },
-  board: {
-    display: "grid",
-    gridTemplateColumns: "repeat(3, 1fr)",
-    gap: "10px",
-    marginTop: "20px",
-  },
-  cell: {
-    aspectRatio: "1 / 1",
-    borderRadius: "12px",
-    border: "1px solid #475569",
-    background: "#111827",
-    color: "#f8fafc",
-    fontSize: "32px",
-    fontWeight: 700,
-    cursor: "pointer",
-  },
 };
 
 export default App;
