@@ -12,6 +12,17 @@ const USE_SSL = String(process.env.REACT_APP_NAKAMA_SSL || "true") === "true";
 
 const EMPTY_BOARD: CellValue[] = ["", "", "", "", "", "", "", "", ""];
 
+const WINNING_COMBINATIONS = [
+  [0, 1, 2],
+  [3, 4, 5],
+  [6, 7, 8],
+  [0, 3, 6],
+  [1, 4, 7],
+  [2, 5, 8],
+  [0, 4, 8],
+  [2, 4, 6],
+];
+
 function App() {
   const [username, setUsername] = useState<string>("jafer");
   const [status, setStatus] = useState<StatusType>("idle");
@@ -29,6 +40,9 @@ function App() {
   const [currentTurn, setCurrentTurn] = useState<"X" | "O">("X");
   const [winner, setWinner] = useState<string>("");
   const [started, setStarted] = useState<boolean>(false);
+  const [playerSymbol, setPlayerSymbol] = useState<"X" | "O">("X");
+  const [isDraw, setIsDraw] = useState<boolean>(false);
+  const [winningCells, setWinningCells] = useState<number[]>([]);
 
   const socketRef = useRef<Socket | null>(null);
 
@@ -63,6 +77,33 @@ function App() {
     setCurrentTurn("X");
     setWinner("");
     setStarted(false);
+    setIsDraw(false);
+    setWinningCells([]);
+  };
+
+  const checkWinner = (newBoard: CellValue[]) => {
+    for (const combo of WINNING_COMBINATIONS) {
+      const [a, b, c] = combo;
+      if (
+        newBoard[a] &&
+        newBoard[a] === newBoard[b] &&
+        newBoard[a] === newBoard[c]
+      ) {
+        return {
+          winner: newBoard[a],
+          winningCells: combo,
+        };
+      }
+    }
+
+    if (newBoard.every((cell) => cell !== "")) {
+      return {
+        winner: "Draw",
+        winningCells: [],
+      };
+    }
+
+    return null;
   };
 
   const disconnectSocket = async (): Promise<void> => {
@@ -180,6 +221,7 @@ function App() {
         setMatchId(joinedId);
         resetBoard();
         setStarted(true);
+        setPlayerSymbol("X");
         setStatus("success");
         setMessage("Match found and joined successfully.");
       } catch (err: unknown) {
@@ -251,7 +293,8 @@ function App() {
       setMatchmakerTicket("");
       resetBoard();
       setStarted(true);
-      setMessage("Game created successfully. Share Match ID to join.");
+      setPlayerSymbol("X");
+      setMessage("Game created successfully. You are X.");
     } catch (err: unknown) {
       console.error("Create match error:", err);
       const e = err as { message?: string };
@@ -281,7 +324,8 @@ function App() {
       setMatchId(joinedId);
       resetBoard();
       setStarted(true);
-      setMessage("Joined match successfully.");
+      setPlayerSymbol("O");
+      setMessage("Joined match successfully. You are O.");
     } catch (err: unknown) {
       console.error("Join match error:", err);
       const e = err as { message?: string };
@@ -352,9 +396,57 @@ function App() {
     setMatchId("");
     setJoinMatchId("");
     setStarted(false);
+    setPlayerSymbol("X");
     resetBoard();
     setStatus("idle");
     setMessage("Device reset complete.");
+  };
+
+  const handleCellClick = (index: number): void => {
+    if (!started) {
+      setMessage("Start or join a game first.");
+      return;
+    }
+
+    if (winner || isDraw) {
+      setMessage("Game is already finished.");
+      return;
+    }
+
+    if (board[index] !== "") {
+      setMessage("This cell is already filled.");
+      return;
+    }
+
+    if (currentTurn !== playerSymbol) {
+      setMessage(`It's ${currentTurn}'s turn.`);
+      return;
+    }
+
+    const updatedBoard = [...board];
+    updatedBoard[index] = currentTurn;
+
+    const result = checkWinner(updatedBoard);
+
+    setBoard(updatedBoard);
+
+    if (result) {
+      if (result.winner === "Draw") {
+        setIsDraw(true);
+        setWinner("");
+        setWinningCells([]);
+        setMessage("It's a draw!");
+      } else {
+        setWinner(result.winner);
+        setWinningCells(result.winningCells);
+        setMessage(`Winner is ${result.winner}!`);
+      }
+      return;
+    }
+
+    const nextTurn = currentTurn === "X" ? "O" : "X";
+    setCurrentTurn(nextTurn);
+    setMessage(`Turn changed to ${nextTurn}.`);
   };
 
   useEffect(() => {
@@ -577,7 +669,7 @@ function App() {
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+              gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
               gap: "14px",
               marginBottom: "22px",
             }}
@@ -647,10 +739,32 @@ function App() {
                   color: "#0f172a",
                   fontWeight: 700,
                   fontSize: "14px",
-                  wordBreak: "break-word",
                 }}
               >
                 {socketConnected ? "Connected" : "Disconnected"}
+              </p>
+            </div>
+
+            <div
+              style={{
+                background: "#f8fafc",
+                borderRadius: "18px",
+                padding: "16px",
+                border: "1px solid #e2e8f0",
+              }}
+            >
+              <p style={{ margin: 0, color: "#64748b", fontSize: "13px" }}>
+                Your Symbol
+              </p>
+              <p
+                style={{
+                  margin: "8px 0 0 0",
+                  color: "#0f172a",
+                  fontWeight: 700,
+                  fontSize: "18px",
+                }}
+              >
+                {playerSymbol}
               </p>
             </div>
           </div>
@@ -830,7 +944,7 @@ function App() {
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+              gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
               gap: "14px",
               marginBottom: "16px",
             }}
@@ -866,11 +980,31 @@ function App() {
                 {currentTurn}
               </p>
             </div>
+
+            <div
+              style={{
+                background: "#1e293b",
+                borderRadius: "18px",
+                padding: "16px",
+                border: "1px solid #334155",
+              }}
+            >
+              <p style={{ margin: 0, color: "#94a3b8", fontSize: "13px" }}>
+                Winner
+              </p>
+              <p style={{ margin: "8px 0 0 0", color: "#fff", fontWeight: 700 }}>
+                {winner || (isDraw ? "Draw" : "-")}
+              </p>
+            </div>
           </div>
 
           <div
             style={{
-              background: "#1e293b",
+              background: winner
+                ? "#14532d"
+                : isDraw
+                ? "#78350f"
+                : "#1e293b",
               borderRadius: "18px",
               padding: "16px",
               border: "1px solid #334155",
@@ -879,9 +1013,11 @@ function App() {
           >
             <p style={{ margin: 0, color: "#fff", fontWeight: 700 }}>
               {winner
-                ? `Winner: ${winner}`
+                ? `Winner is ${winner}`
+                : isDraw
+                ? "Match Draw"
                 : started
-                ? "Game in progress"
+                ? `Game in progress - ${currentTurn}'s turn`
                 : "Waiting to start"}
             </p>
           </div>
@@ -893,24 +1029,44 @@ function App() {
               gap: "12px",
             }}
           >
-            {board.map((cell, index) => (
-              <button
-                key={index}
-                onClick={() => setMessage(`Cell ${index + 1} clicked.`)}
-                style={{
-                  aspectRatio: "1 / 1",
-                  borderRadius: "18px",
-                  border: "1px solid #334155",
-                  background: "#1e293b",
-                  color: "#fff",
-                  fontSize: "32px",
-                  fontWeight: 800,
-                  cursor: "pointer",
-                }}
-              >
-                {cell}
-              </button>
-            ))}
+            {board.map((cell, index) => {
+              const isWinningCell = winningCells.includes(index);
+
+              return (
+                <button
+                  key={index}
+                  onClick={() => handleCellClick(index)}
+                  disabled={!started || !!winner || isDraw || cell !== ""}
+                  style={{
+                    aspectRatio: "1 / 1",
+                    borderRadius: "18px",
+                    border: isWinningCell
+                      ? "2px solid #22c55e"
+                      : "1px solid #334155",
+                    background: isWinningCell ? "#14532d" : "#1e293b",
+                    color:
+                      cell === "X"
+                        ? "#60a5fa"
+                        : cell === "O"
+                        ? "#f59e0b"
+                        : "#fff",
+                    fontSize: "48px",
+                    fontWeight: 800,
+                    cursor:
+                      !started || !!winner || isDraw || cell !== ""
+                        ? "not-allowed"
+                        : "pointer",
+                    opacity:
+                      !started || (!!winner && !isWinningCell) || isDraw
+                        ? 0.95
+                        : 1,
+                    transition: "all 0.2s ease",
+                  }}
+                >
+                  {cell}
+                </button>
+              );
+            })}
           </div>
         </div>
       </div>
